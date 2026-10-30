@@ -2,23 +2,43 @@
 // TikTok Fix Core Injected Engine v2.4
 // Pure Native TikTok Style (Zero Emojis, Native Fonts & Themes)
 // Features: Feed 2026, Dates, Reposts, Downloader (MP4 + MP3),
-//           Hotkeys (Rewind, Speed, PiP), Mouse Wheel Volume, Copy & Translate
+//           PiP Feed Scrolling (Wheel / Arrows / Auto-Advance), Hotkeys (Rewind, Speed, PiP), Mouse Wheel Volume
 // =========================================================================
 (function() {
     window.TIKTOK_FIX_ACTIVE = true;
 
-    // Load user preferences
-    let blockAds = localStorage.getItem("tf_block_ads") !== "false";
-    let blockStreams = localStorage.getItem("tf_block_streams") !== "false";
-    let blockPhotos = localStorage.getItem("tf_block_photos") !== "false";
-    let currentRegion = localStorage.getItem("tf_region") || "FR";
+    // Safe storage helper (prevents SecurityError if storage is partitioned/restricted)
+    function safeStorageGet(key, defVal) {
+        try {
+            if (typeof window !== 'undefined' && 'localStorage' in window && window.localStorage) {
+                let v = window.localStorage.getItem(key);
+                return v !== null ? v : defVal;
+            }
+        } catch (e) {}
+        return defVal;
+    }
+
+    function safeStorageSet(key, val) {
+        try {
+            if (typeof window !== 'undefined' && 'localStorage' in window && window.localStorage) {
+                window.localStorage.setItem(key, String(val));
+            }
+        } catch (e) {}
+    }
+
+    // Load user preferences safely
+    let blockAds = safeStorageGet("tf_block_ads", "true") !== "false";
+    let blockStreams = safeStorageGet("tf_block_streams", "true") !== "false";
+    let blockPhotos = safeStorageGet("tf_block_photos", "true") !== "false";
+    let currentRegion = safeStorageGet("tf_region", "DE");
 
     // Global cache for intercepted video direct download URLs
     window.__TIKTOK_FIX_VIDEOS = window.__TIKTOK_FIX_VIDEOS || new Map();
 
     function captureVideoItems(data) {
-        if (!data) return;
-        let items = data.itemList || (data.itemInfo && [data.itemInfo.itemStruct]) || [];
+        if (!data || typeof data !== 'object') return;
+        let items = data.itemList || (data.itemInfo && [data.itemInfo.itemStruct]) || data.aweme_list || [];
+        if (!Array.isArray(items)) return;
         items.forEach(it => {
             if (it && it.id) {
                 let vid = it.video || {};
@@ -46,12 +66,34 @@
         try {
             let clone = resp.clone();
             let url = (args[0] && args[0].url) || args[0] || '';
-            if (typeof url === 'string' && (url.includes('/item_list') || url.includes('/item/detail') || url.includes('/user/repost') || url.includes('/recommend/item_list'))) {
+            if (typeof url === 'string' && (url.includes('item') || url.includes('feed') || url.includes('detail') || url.includes('repost'))) {
                 clone.json().then(captureVideoItems).catch(() => {});
             }
         } catch(e) {}
         return resp;
     };
+
+    // Intercept XMLHttpRequest for legacy and background requests
+    try {
+        let origXhrOpen = XMLHttpRequest.prototype.open;
+        let origXhrSend = XMLHttpRequest.prototype.send;
+        XMLHttpRequest.prototype.open = function(method, url) {
+            this._tf_url = url;
+            return origXhrOpen.apply(this, arguments);
+        };
+        XMLHttpRequest.prototype.send = function() {
+            this.addEventListener('load', function() {
+                try {
+                    let u = this._tf_url || '';
+                    if (typeof u === 'string' && (u.includes('item') || u.includes('feed') || u.includes('detail'))) {
+                        let data = JSON.parse(this.responseText);
+                        captureVideoItems(data);
+                    }
+                } catch(e) {}
+            });
+            return origXhrSend.apply(this, arguments);
+        };
+    } catch(e) {}
 
     // -------------------------------------------------------------
     // Helper: Convert Unix Timestamp to DD.MM.YYYY
@@ -90,12 +132,21 @@
                 if (k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance')) {
                     let fiber = curr[k];
                     let fdepth = 0;
-                    while (fiber && fdepth < 15) {
+                    while (fiber && fdepth < 25) {
                         let p = fiber.memoizedProps;
                         if (p) {
-                            let item = p.itemInfo || p.item || p.videoData || p.aweme || p.videoInfo;
-                            if (item && (item.id || item.createTime || item.video)) return item;
+                            let item = p.itemStruct || p.itemInfo?.itemStruct || p.itemInfo || p.item || p.videoData || p.aweme || p.post || p.videoInfo;
+                            if (item) {
+                                if (item.itemStruct) item = item.itemStruct;
+                                if (item.id || item.video || item.desc) return item;
+                            }
                             if (p.id && String(p.id).length >= 18) return p;
+                            if (p.video && (p.video.playAddr || p.video.downloadAddr)) return p;
+                        }
+                        let s = fiber.memoizedState;
+                        if (s && typeof s === 'object') {
+                            let item = s.itemStruct || s.itemInfo?.itemStruct || s.item;
+                            if (item && (item.id || item.video)) return item;
                         }
                         fiber = fiber.return;
                         fdepth++;
@@ -290,7 +341,7 @@
     // 2. Unhide & Enable Repost Tab ("Репосты") in User Profiles
     // -------------------------------------------------------------
     function updateRepostTab() {
-        if (!window.location.href.includes('/@')) return;
+        if (!document.body || !window.location.href.includes('/@')) return;
 
         let repostTab = document.querySelector('[data-e2e="repost-tab"]');
         if (repostTab) {
@@ -382,6 +433,7 @@
     // 4. Content Filters (Ads, Streams, Photos)
     // -------------------------------------------------------------
     function filterContent() {
+        if (!document.body) return;
         if (blockAds) {
             document.querySelectorAll('div[data-e2e="ad-badge"], div:has(> [data-e2e="ad-badge"])').forEach(el => {
                 let card = el.closest('article[data-e2e="recommend-list-item-container"]') || el.closest('[data-e2e="recommend-list-item"]') || el.closest('div[class*="ItemContainer"]');
@@ -406,6 +458,7 @@
     // 5. Volume Control via Mouse Wheel directly on video
     // -------------------------------------------------------------
     function bindVideoVolume() {
+        if (!document.body) return;
         let videos = document.querySelectorAll('video');
         videos.forEach(v => {
             if (v.dataset.tfVolBound) return;
@@ -421,174 +474,546 @@
                 v.volume = newVol;
                 if (newVol > 0 && v.muted) v.muted = false;
                 if (newVol === 0) v.muted = true;
-                localStorage.setItem('tf_volume', newVol);
+                safeStorageSet('tf_volume', newVol);
                 showVideoToast(`Громкость: ${Math.round(newVol * 100)}%`);
             }, { passive: false });
         });
     }
 
     // -------------------------------------------------------------
-    // 6. Direct Video & Audio Downloader
+    // Helper: Collect all video items from JSON scripts and cache
     // -------------------------------------------------------------
-    function getActiveMediaInfo() {
-        let directUrl = null;
-        let audioUrl = null;
+    function collectAllKnownItems() {
+        let items = [];
+        let seenIds = new Set();
+
+        function add(it) {
+            if (!it) return;
+            let id = it.id || (it.itemStruct && it.itemStruct.id);
+            if (!id) return;
+            id = String(id);
+            if (seenIds.has(id)) return;
+            seenIds.add(id);
+
+            let real = it.itemStruct || it;
+            let vid = real.video || {};
+            let url = (typeof vid.playAddr === 'string' ? vid.playAddr : (vid.playAddr?.urlList?.[0])) ||
+                      (typeof vid.downloadAddr === 'string' ? vid.downloadAddr : (vid.downloadAddr?.urlList?.[0])) ||
+                      (vid.bitrate?.[vid.bitrate.length - 1]?.playAddr?.urlList?.[0]) || '';
+            let musicUrl = real.music?.playUrl || (real.music?.playUrl?.urlList?.[0]) || '';
+
+            items.push({
+                id: id,
+                author: real.author?.uniqueId || '',
+                desc: real.desc || '',
+                url: url,
+                audioUrl: musicUrl,
+                createTime: real.createTime || 0
+            });
+        }
+
+        // 1. From __UNIVERSAL_DATA_FOR_REHYDRATION__
+        try {
+            let script = document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__');
+            if (script && script.textContent) {
+                let data = JSON.parse(script.textContent);
+                function deepFindItems(obj, d) {
+                    if (!obj || typeof obj !== 'object' || d > 6) return;
+                    if (Array.isArray(obj)) {
+                        for (let el of obj) deepFindItems(el, d + 1);
+                    } else {
+                        if (obj.itemList && Array.isArray(obj.itemList)) {
+                            obj.itemList.forEach(add);
+                        }
+                        if (obj.itemInfo && obj.itemInfo.itemStruct) {
+                            add(obj.itemInfo.itemStruct);
+                        }
+                        if (obj.id && (obj.video || obj.music)) {
+                            add(obj);
+                        }
+                        for (let k in obj) {
+                            if (typeof obj[k] === 'object') deepFindItems(obj[k], d + 1);
+                        }
+                    }
+                }
+                deepFindItems(data, 0);
+            }
+        } catch(e) {}
+
+        // 2. From SIGI_STATE
+        try {
+            let sigi = document.getElementById('SIGI_STATE');
+            if (sigi && sigi.textContent) {
+                let sdata = JSON.parse(sigi.textContent);
+                if (sdata.ItemModule) {
+                    for (let k in sdata.ItemModule) add(sdata.ItemModule[k]);
+                }
+            }
+        } catch(e) {}
+
+        // 3. From window.__TIKTOK_FIX_VIDEOS (intercepted fetch/XHR)
+        if (window.__TIKTOK_FIX_VIDEOS) {
+            for (let [id, val] of window.__TIKTOK_FIX_VIDEOS.entries()) {
+                add(val);
+            }
+        }
+
+        return items;
+    }
+
+    // -------------------------------------------------------------
+    // 6. Ultra-Fast Video & Audio Downloader (Multi-Strategy Extraction & In-Browser Fetch)
+    // -------------------------------------------------------------
+    function getActiveArticle() {
+        let items = Array.from(document.querySelectorAll('article[id^="one-column-item-"], article[data-e2e="recommend-list-item-container"], div[class*="ItemContainer"], section[data-e2e="feed-video"]'));
+        if (!items.length) {
+            items = Array.from(document.querySelectorAll('article, section'));
+        }
+        let midY = window.innerHeight / 2;
+        let best = null, minDist = 999999;
+        for (let el of items) {
+            let r = el.getBoundingClientRect();
+            if (r.height > 100) {
+                let dist = Math.abs((r.top + r.height / 2) - midY);
+                if (dist < minDist) {
+                    minDist = dist;
+                    best = el;
+                }
+            }
+        }
+        return best;
+    }
+
+    function extractVideoUrls(vid) {
+        let urls = [];
+        if (!vid || typeof vid !== 'object') return urls;
+        function deep(obj) {
+            if (!obj) return;
+            if (typeof obj === 'string') {
+                if (obj.startsWith('http://') || obj.startsWith('https://')) {
+                    let lower = obj.toLowerCase();
+                    if (!urls.includes(obj) && !lower.includes('avatar') && !lower.includes('cover') && !lower.includes('.jpeg') && !lower.includes('.jpg') && !lower.includes('.png')) {
+                        urls.push(obj);
+                    }
+                }
+                return;
+            }
+            if (Array.isArray(obj)) {
+                for (let x of obj) deep(x);
+                return;
+            }
+            if (typeof obj === 'object') {
+                for (let k in obj) {
+                    let kl = k.toLowerCase();
+                    if (kl.includes('cover') || kl.includes('avatar') || kl.includes('thumb')) continue;
+                    deep(obj[k]);
+                }
+            }
+        }
+        deep(vid);
+        urls.sort((a, b) => {
+            let scoreA = (a.includes('/aweme/v1/play/') ? 10 : 0) + (a.includes('v16-') || a.includes('v19-') ? 5 : 0);
+            let scoreB = (b.includes('/aweme/v1/play/') ? 10 : 0) + (b.includes('v16-') || b.includes('v19-') ? 5 : 0);
+            return scoreB - scoreA;
+        });
+        return urls;
+    }
+
+    function extractAudioUrls(mus) {
+        let urls = [];
+        if (!mus || typeof mus !== 'object') return urls;
+        function deep(obj) {
+            if (!obj) return;
+            if (typeof obj === 'string') {
+                if (obj.startsWith('http://') || obj.startsWith('https://')) {
+                    let lower = obj.toLowerCase();
+                    if (!urls.includes(obj) && !lower.includes('.jpeg') && !lower.includes('.jpg') && !lower.includes('.png') && !lower.includes('avatar')) {
+                        urls.push(obj);
+                    }
+                }
+                return;
+            }
+            if (Array.isArray(obj)) {
+                for (let x of obj) deep(x);
+                return;
+            }
+            if (typeof obj === 'object') {
+                for (let k in obj) {
+                    let kl = k.toLowerCase();
+                    if (kl.includes('cover') || kl.includes('avatar')) continue;
+                    deep(obj[k]);
+                }
+            }
+        }
+        deep(mus);
+        return urls;
+    }
+
+    function getFullItemFromFiber(el) {
+        if (!el) return null;
+        let fiberKey = Object.keys(el).find(k => k.startsWith('__reactFiber'));
+        if (!fiberKey) {
+            let childWithFiber = el.querySelector('[id*="item"], [data-e2e], section, canvas, div, video');
+            if (childWithFiber) fiberKey = Object.keys(childWithFiber).find(k => k.startsWith('__reactFiber'));
+            if (childWithFiber && fiberKey) el = childWithFiber;
+        }
+        if (!fiberKey) return null;
+
+        let f = el[fiberKey];
+        let found = null;
+
+        function checkObj(obj) {
+            if (!obj || typeof obj !== 'object') return null;
+            if (obj.item && (obj.item.video || obj.item.music)) return obj.item;
+            if (obj.itemStruct && (obj.itemStruct.video || obj.itemStruct.music)) return obj.itemStruct;
+            if (obj.video && (obj.video.playAddr || obj.video.bitrateInfo || obj.video.PlayAddrStruct || obj.video.downloadAddr)) return obj;
+            return null;
+        }
+
+        function search(node, depth) {
+            if (!node || depth > 15 || found) return;
+            let propsList = [node.memoizedProps, node.pendingProps];
+            for (let p of propsList) {
+                if (!p || typeof p !== 'object') continue;
+                let item = checkObj(p);
+                if (item) { found = item; return; }
+                if (p.children) {
+                    if (Array.isArray(p.children)) {
+                        for (let c of p.children) {
+                            item = checkObj(c?.props) || checkObj(c);
+                            if (item) { found = item; return; }
+                        }
+                    } else if (typeof p.children === 'object') {
+                        item = checkObj(p.children.props) || checkObj(p.children);
+                        if (item) { found = item; return; }
+                    }
+                }
+            }
+            if (node.child) search(node.child, depth + 1);
+            if (node.sibling && depth <= 3) search(node.sibling, depth);
+        }
+
+        let curr = f;
+        while (curr && !found) {
+            search(curr, 0);
+            curr = curr.return;
+        }
+        return found;
+    }
+
+    async function getActiveMediaInfo() {
+        let candidateVideoUrls = [];
+        let candidateAudioUrls = [];
         let pageUrl = window.location.href;
         let videoId = null;
+        let author = '';
         let desc = '';
 
         let v = getActiveVideo();
-        if (v) {
-            if (v.currentSrc && v.currentSrc.startsWith('http') && !v.currentSrc.startsWith('blob:')) {
-                directUrl = v.currentSrc;
+        let article = (v && (v.closest('article, [data-e2e="recommend-list-item-container"], div[class*="ItemContainer"]') || v.parentElement)) || getActiveArticle();
+
+        // Strategy 1: URL inspection (single video page or modal)
+        let urlMatch = window.location.href.match(/\/video\/(\d{18,20})/);
+        if (urlMatch) {
+            videoId = urlMatch[1];
+            let authMatch = window.location.href.match(/@([^\/?#]+)/);
+            if (authMatch) author = authMatch[1];
+        }
+
+        // Strategy 2: React Fiber deep inspection (guaranteed on modern TikTok feed)
+        let fItem = getFullItemFromFiber(article) || getFullItemFromFiber(v);
+        if (fItem) {
+            if (fItem.id) videoId = String(fItem.id);
+            if (fItem.author?.uniqueId) author = fItem.author.uniqueId;
+            if (fItem.desc) desc = fItem.desc;
+
+            let extractedVideos = extractVideoUrls(fItem.video || fItem);
+            for (let u of extractedVideos) {
+                if (!candidateVideoUrls.includes(u)) candidateVideoUrls.push(u);
             }
-            let vData = getVideoDataFromElement(v);
-            if (vData) {
-                if (vData.id) videoId = String(vData.id);
-                if (vData.desc) desc = vData.desc;
-                if (vData.music) audioUrl = vData.music.playUrl || (vData.music.playUrl?.urlList?.[0]) || '';
-                if (vData.video) {
-                    let vid = vData.video;
-                    directUrl = (typeof vid.playAddr === 'string' ? vid.playAddr : (vid.playAddr?.urlList?.[0])) ||
-                                (typeof vid.downloadAddr === 'string' ? vid.downloadAddr : (vid.downloadAddr?.urlList?.[0])) ||
-                                (vid.bitrate?.[vid.bitrate.length - 1]?.playAddr?.urlList?.[0]) || directUrl;
+
+            let extractedAudios = extractAudioUrls(fItem.music);
+            for (let u of extractedAudios) {
+                if (!candidateAudioUrls.includes(u)) candidateAudioUrls.push(u);
+            }
+        }
+
+        // Strategy 3: Inspect DOM container for links
+        if (!videoId && article) {
+            let a = article.querySelector('a[href*="/video/"]');
+            if (a) {
+                let m = a.href.match(/\/video\/(\d{18,20})/);
+                if (m) videoId = m[1];
+                let mAuth = a.href.match(/@([^\/?#]+)/);
+                if (mAuth) author = mAuth[1];
+            }
+        }
+        if (!author && article) {
+            let aAuth = article.querySelector('a[href^="/@"]');
+            if (aAuth) {
+                let mAuth = aAuth.getAttribute('href').match(/@([^\/?#]+)/);
+                if (mAuth) author = mAuth[1];
+            }
+        }
+
+        // Strategy 4: Intercepted fetch and rehydration items
+        let knownItems = collectAllKnownItems();
+        let matched = null;
+        if (videoId) matched = knownItems.find(it => it.id === videoId);
+        if (!matched && author) matched = knownItems.find(it => it.author === author);
+        if (!matched && knownItems.length > 0) {
+            matched = knownItems[0];
+        }
+
+        if (matched) {
+            if (!videoId) videoId = matched.id;
+            if (!author) author = matched.author;
+            if (!desc) desc = matched.desc;
+            if (matched.url && !candidateVideoUrls.includes(matched.url)) candidateVideoUrls.push(matched.url);
+            if (matched.audioUrl && !candidateAudioUrls.includes(matched.audioUrl)) candidateAudioUrls.push(matched.audioUrl);
+        }
+
+        // Strategy 5: Video element currentSrc if non-blob
+        if (v && v.currentSrc && v.currentSrc.startsWith('http') && !v.currentSrc.startsWith('blob:')) {
+            if (!candidateVideoUrls.includes(v.currentSrc)) candidateVideoUrls.push(v.currentSrc);
+        }
+
+        // Strategy 6: TikTok internal item detail API if candidate URLs are empty
+        if (videoId && !candidateVideoUrls.length) {
+            try {
+                let r = await fetch(`https://www.tiktok.com/api/item/detail/?itemId=${videoId}`, { credentials: 'include' });
+                if (r.ok) {
+                    let d = await r.json();
+                    let st = d.itemInfo?.itemStruct;
+                    if (st) {
+                        let vid = st.video || {};
+                        if (vid.PlayAddrStruct?.UrlList) {
+                            let aweme = vid.PlayAddrStruct.UrlList.find(u => u.includes('/aweme/v1/play/'));
+                            if (aweme) candidateVideoUrls.push(aweme);
+                            for (let u of vid.PlayAddrStruct.UrlList) {
+                                if (!candidateVideoUrls.includes(u)) candidateVideoUrls.push(u);
+                            }
+                        }
+                        if (vid.playAddr && !candidateVideoUrls.includes(vid.playAddr)) candidateVideoUrls.push(vid.playAddr);
+                        if (vid.downloadAddr && !candidateVideoUrls.includes(vid.downloadAddr)) candidateVideoUrls.push(vid.downloadAddr);
+                        if (st.music?.playUrl && !candidateAudioUrls.includes(st.music.playUrl)) candidateAudioUrls.push(st.music.playUrl);
+                    }
                 }
-                if (vData.author && vData.author.uniqueId && videoId) {
-                    pageUrl = `https://www.tiktok.com/@${vData.author.uniqueId}/video/${videoId}`;
-                }
-            }
+            } catch(e) {}
         }
 
-        let m = window.location.href.match(/\/video\/(\d+)/);
-        if (m) {
-            videoId = m[1];
-            pageUrl = window.location.href;
+        if (videoId) {
+            pageUrl = `https://www.tiktok.com/@${author || 'tiktok'}/video/${videoId}`;
         }
 
-        if (videoId && window.__TIKTOK_FIX_VIDEOS && window.__TIKTOK_FIX_VIDEOS.has(videoId)) {
-            let info = window.__TIKTOK_FIX_VIDEOS.get(videoId);
-            if (info.url) directUrl = info.url;
-            if (info.audioUrl) audioUrl = info.audioUrl;
-            if (info.desc) desc = info.desc;
-            if (info.author && !pageUrl.includes('/video/')) {
-                pageUrl = `https://www.tiktok.com/@${info.author}/video/${videoId}`;
-            }
-        }
-
-        if (!desc) {
-            let dEl = document.querySelector('h1[data-e2e="browse-video-desc"], div[data-e2e="browse-video-desc"], [data-e2e="user-post-item-desc"]');
-            if (dEl) desc = dEl.innerText.trim();
-        }
-
-        return { videoId, pageUrl, directUrl, audioUrl, desc };
+        return {
+            videoId,
+            pageUrl,
+            candidateVideoUrls,
+            candidateAudioUrls,
+            directUrl: candidateVideoUrls[0] || '',
+            audioUrl: candidateAudioUrls[0] || '',
+            desc,
+            author
+        };
     }
 
-    function downloadCurrentVideo(btn) {
+    async function callFixApi(path) {
+        let pList = [window.__TIKTOK_FIX_API_PORT__ || 28889, 28889, 28890, 28891];
+        pList = [...new Set(pList)];
+        let lastErr = null;
+        for (let p of pList) {
+            try {
+                let res = await fetch(`http://127.0.0.1:${p}${path}`, {
+                    method: 'GET',
+                    mode: 'cors',
+                    headers: { 'Accept': 'application/json' }
+                });
+                if (res.ok) {
+                    return await res.json();
+                }
+            } catch (e) {
+                lastErr = e;
+            }
+        }
+        throw lastErr || new Error('Сервер недоступен');
+    }
+
+    async function saveFileToBackend(filename, blob) {
+        let pList = [window.__TIKTOK_FIX_API_PORT__ || 28889, 28889, 28890, 28891];
+        pList = [...new Set(pList)];
+        for (let p of pList) {
+            try {
+                let res = await fetch(`http://127.0.0.1:${p}/api/save_file?name=${encodeURIComponent(filename)}`, {
+                    method: 'POST',
+                    mode: 'cors',
+                    body: blob
+                });
+                if (res.ok) {
+                    return await res.json();
+                }
+            } catch (e) {}
+        }
+        return null;
+    }
+
+    function triggerBrowserDownload(blob, filename) {
+        try {
+            let blobUrl = URL.createObjectURL(blob);
+            let a = document.createElement('a');
+            a.href = blobUrl;
+            a.download = filename;
+            a.style.display = 'none';
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            setTimeout(() => URL.revokeObjectURL(blobUrl), 15000);
+            return true;
+        } catch(e) {
+            return false;
+        }
+    }
+
+    async function downloadCurrentVideo(btn) {
         if (!btn) return;
         let origText = btn.textContent;
-        btn.textContent = 'Поиск видео...';
+        btn.textContent = 'Поиск...';
+        showVideoToast('Поиск видео...');
 
-        let info = getActiveMediaInfo();
-        btn.textContent = 'Скачивание...';
+        try {
+            let info = await getActiveMediaInfo();
+            btn.textContent = 'Загрузка...';
+            showVideoToast('Загрузка видео...');
 
-        fetch(`http://127.0.0.1:28889/api/download?page=${encodeURIComponent(info.pageUrl)}&src=${encodeURIComponent(info.directUrl || '')}`)
-            .then(r => r.json())
-            .then(data => {
-                btn.textContent = origText;
-                if (data.success) {
-                    showVideoToast(`Сохранено: ${data.filename}`);
-                    alert(`Видео успешно сохранено в Загрузки!\nФайл: ${data.filename}`);
-                } else {
-                    alert(`Ошибка скачивания: ${data.error || 'Не удалось получить видео'}`);
-                }
-            })
-            .catch(err => {
-                btn.textContent = origText;
-                alert(`Ошибка соединения: ${err}`);
+            let filename = `TikTok_${info.videoId || Math.floor(Date.now() / 1000)}.mp4`;
+            let downloadedBlob = null;
+
+            // 1. Fast in-browser fetch (cross-origin without credentials for clean CDN access)
+            for (let url of (info.candidateVideoUrls || [])) {
+                try {
+                    let r = await fetch(url);
+                    if (r.ok && (r.status === 200 || r.status === 206)) {
+                        let b = await r.blob();
+                        if (b && b.size > 25000) {
+                            downloadedBlob = b;
+                            break;
+                        }
+                    }
+                } catch(e) {}
+            }
+
+            if (downloadedBlob) {
+                triggerBrowserDownload(downloadedBlob, filename);
+                await saveFileToBackend(filename, downloadedBlob);
+
+                btn.textContent = 'Готово!';
+                showVideoToast(`Сохранено: ${filename}`);
+                setTimeout(() => { btn.textContent = origText; }, 2500);
+                return;
+            }
+
+            // 2. Direct backend stream downloader
+            btn.textContent = 'Сервер...';
+            let params = new URLSearchParams({
+                id: info.videoId || '',
+                page: info.pageUrl || window.location.href,
+                src: info.directUrl || '',
+                urls: JSON.stringify(info.candidateVideoUrls || []),
+                author: info.author || '',
+                desc: info.desc || '',
+                cookie: document.cookie || ''
             });
+
+            let data = await callFixApi('/api/download?' + params.toString());
+            if (data && data.success) {
+                btn.textContent = 'Готово!';
+                showVideoToast(`Сохранено: ${data.filename}`);
+            } else {
+                btn.textContent = 'Ошибка';
+                showVideoToast(`Ошибка: ${(data && data.error) || 'Не удалось скачать видео'}`);
+            }
+        } catch(err) {
+            btn.textContent = 'Ошибка';
+            showVideoToast('Ошибка загрузки видео');
+        }
+        setTimeout(() => { btn.textContent = origText; }, 2500);
     }
 
-    function downloadCurrentAudio(btn) {
+    async function downloadCurrentAudio(btn) {
         if (!btn) return;
         let origText = btn.textContent;
-        btn.textContent = 'Поиск аудио...';
+        btn.textContent = 'Поиск...';
+        showVideoToast('Поиск аудио...');
 
-        let info = getActiveMediaInfo();
-        btn.textContent = 'Скачивание MP3...';
+        try {
+            let info = await getActiveMediaInfo();
+            btn.textContent = 'Загрузка...';
+            showVideoToast('Загрузка аудио...');
 
-        fetch(`http://127.0.0.1:28889/api/download_audio?page=${encodeURIComponent(info.pageUrl)}&src=${encodeURIComponent(info.directUrl || '')}&audio_src=${encodeURIComponent(info.audioUrl || '')}`)
-            .then(r => r.json())
-            .then(data => {
-                btn.textContent = origText;
-                if (data.success) {
-                    showVideoToast(`Звук сохранен: ${data.filename}`);
-                    alert(`Аудиодорожка успешно сохранена в Загрузки!\nФайл: ${data.filename}`);
-                } else {
-                    alert(`Ошибка скачивания: ${data.error || 'Не удалось получить аудио'}`);
-                }
-            })
-            .catch(err => {
-                btn.textContent = origText;
-                alert(`Ошибка соединения: ${err}`);
-            });
-    }
+            let filename = `TikTok_Audio_${info.videoId || Math.floor(Date.now() / 1000)}.mp3`;
+            let downloadedBlob = null;
 
-    function copyCurrentDescription(btn) {
-        let info = getActiveMediaInfo();
-        let text = info.desc;
-        if (!text) {
-            let el = document.querySelector('h1[data-e2e="browse-video-desc"], div[data-e2e="browse-video-desc"], [data-e2e="user-post-item-desc"]');
-            if (el) text = el.innerText.trim();
-        }
-        if (!text) {
-            alert('Описание текущего видео не найдено');
-            return;
-        }
-        navigator.clipboard.writeText(text).then(() => {
-            showVideoToast('Описание скопировано!');
-            if (btn) {
-                let p = btn.textContent;
-                btn.textContent = 'Скопировано!';
-                setTimeout(() => { btn.textContent = p; }, 1200);
+            // 1. Fast in-browser fetch
+            for (let url of (info.candidateAudioUrls || [])) {
+                try {
+                    let r = await fetch(url);
+                    if (r.ok && (r.status === 200 || r.status === 206)) {
+                        let b = await r.blob();
+                        if (b.size > 5000) {
+                            downloadedBlob = b;
+                            break;
+                        }
+                    }
+                } catch(e) {}
             }
-        });
-    }
 
-    function translateCurrentDescription(btn) {
-        let info = getActiveMediaInfo();
-        let text = info.desc;
-        if (!text) {
-            let el = document.querySelector('h1[data-e2e="browse-video-desc"], div[data-e2e="browse-video-desc"], [data-e2e="user-post-item-desc"]');
-            if (el) text = el.innerText.trim();
-        }
-        if (!text) {
-            alert('Описание текущего видео не найдено');
-            return;
-        }
+            if (downloadedBlob) {
+                triggerBrowserDownload(downloadedBlob, filename);
+                await saveFileToBackend(filename, downloadedBlob);
 
-        let p = btn ? btn.textContent : '';
-        if (btn) btn.textContent = 'Перевод...';
+                btn.textContent = 'Готово!';
+                showVideoToast(`Звук сохранен: ${filename}`);
+                setTimeout(() => { btn.textContent = origText; }, 2500);
+                return;
+            }
 
-        fetch(`http://127.0.0.1:28889/api/translate?text=${encodeURIComponent(text)}`)
-            .then(r => r.json())
-            .then(d => {
-                if (btn) btn.textContent = p;
-                if (d.success && d.translated) {
-                    alert(`Перевод описания:\n\n${d.translated}`);
-                } else {
-                    alert('Не удалось перевести описание');
-                }
-            })
-            .catch(e => {
-                if (btn) btn.textContent = p;
-                alert('Ошибка перевода: ' + e);
+            // 2. Direct backend stream downloader
+            btn.textContent = 'Сервер...';
+            let params = new URLSearchParams({
+                id: info.videoId || '',
+                page: info.pageUrl || window.location.href,
+                src: info.directUrl || '',
+                audio_src: info.audioUrl || '',
+                urls: JSON.stringify(info.candidateAudioUrls || []),
+                author: info.author || '',
+                desc: info.desc || '',
+                cookie: document.cookie || ''
             });
+
+            let data = await callFixApi('/api/download_audio?' + params.toString());
+            if (data && data.success) {
+                btn.textContent = 'Готово!';
+                showVideoToast(`Звук сохранен: ${data.filename}`);
+            } else {
+                btn.textContent = 'Ошибка';
+                showVideoToast(`Ошибка: ${(data && data.error) || 'Не удалось скачать звук'}`);
+            }
+        } catch(err) {
+            btn.textContent = 'Ошибка';
+            showVideoToast('Ошибка загрузки звука');
+        }
+        setTimeout(() => { btn.textContent = origText; }, 2500);
     }
+    // Expose helpers globally on window
+    window.__tfDownloadCurrentVideo = downloadCurrentVideo;
+    window.__tfDownloadCurrentAudio = downloadCurrentAudio;
+    window.__tfGetActiveMediaInfo = getActiveMediaInfo;
 
     // -------------------------------------------------------------
     // 7. Mod Settings Button (Bottom-Right Floating Gear, No Text)
     // -------------------------------------------------------------
     function updateFabSettingsButton() {
+        if (!document.body) return;
         let oldTopBtn = document.getElementById('tiktok-fix-header-btn');
         if (oldTopBtn) oldTopBtn.remove();
 
@@ -648,7 +1073,7 @@
     // 8. Native Settings Section on /setting (Clean TikTok UI)
     // -------------------------------------------------------------
     function updateSettingsPage() {
-        if (!window.location.href.includes('/setting')) return;
+        if (!document.body || !window.location.href.includes('/setting')) return;
         if (document.getElementById('tiktok-fix-native-section')) return;
 
         let manageContainer = document.querySelector('div[class*="DivManageContainer"]');
@@ -687,8 +1112,15 @@
                 <div>
                     <label style="display: block; font-size: 12px; color: rgba(255, 255, 255, 0.6); margin-bottom: 6px; font-weight: 600;">Регион подключения</label>
                     <select id="tf-nat-region" style="width: 100%; background: #252533; color: #fff; border: 1px solid #3d3d50; border-radius: 8px; padding: 10px 12px; font-size: 14px; outline: none; cursor: pointer;">
+                        <option value="DE">Германия (DE)</option>
+                        <option value="NL">Нидерланды (NL)</option>
                         <option value="FR">Франция (FR)</option>
                         <option value="US">США (US)</option>
+                        <option value="GB">Великобритания (GB)</option>
+                        <option value="PL">Польша (PL)</option>
+                        <option value="SE">Швеция (SE)</option>
+                        <option value="JP">Япония (JP)</option>
+                        <option value="SG">Сингапур (SG)</option>
                         <option value="DIRECT">Россия (Прямой)</option>
                     </select>
                 </div>
@@ -739,32 +1171,32 @@
 
         document.getElementById('tf-nat-region').onchange = (e) => {
             currentRegion = e.target.value;
-            localStorage.setItem("tf_region", currentRegion);
-            fetch(`http://127.0.0.1:28889/api/set_region?code=${currentRegion}`).then(() => location.reload()).catch(() => location.reload());
+            safeStorageSet("tf_region", currentRegion);
+            fetch(`/api/set_region?code=${currentRegion}`).then(() => location.reload()).catch(() => location.reload());
         };
         document.getElementById('tf-nat-reconnect').onclick = () => {
             let b = document.getElementById('tf-nat-reconnect');
             b.textContent = 'Подключение...';
-            fetch('http://127.0.0.1:28889/api/reconnect').then(() => setTimeout(() => location.reload(), 500)).catch(() => location.reload());
+            callFixApi('/api/reconnect').then(() => setTimeout(() => location.reload(), 500)).catch(() => location.reload());
         };
         document.getElementById('tf-nat-clear').onclick = () => {
             if (confirm('Сбросить кэш и обновить сессию?')) {
-                fetch('http://127.0.0.1:28889/api/clear_cache').then(() => location.reload()).catch(() => location.reload());
+                callFixApi('/api/clear_cache').then(() => location.reload()).catch(() => location.reload());
             }
         };
         document.getElementById('tf-nat-ads').onchange = (e) => {
             blockAds = e.target.checked;
-            localStorage.setItem("tf_block_ads", blockAds);
+            safeStorageSet("tf_block_ads", blockAds);
             filterContent();
         };
         document.getElementById('tf-nat-streams').onchange = (e) => {
             blockStreams = e.target.checked;
-            localStorage.setItem("tf_block_streams", blockStreams);
+            safeStorageSet("tf_block_streams", blockStreams);
             filterContent();
         };
         document.getElementById('tf-nat-photos').onchange = (e) => {
             blockPhotos = e.target.checked;
-            localStorage.setItem("tf_block_photos", blockPhotos);
+            safeStorageSet("tf_block_photos", blockPhotos);
             filterContent();
         };
         document.getElementById('tf-nat-download').onclick = () => {
@@ -782,7 +1214,7 @@
     // 9. Floating Settings Panel (Outside React, Completely Safe)
     // -------------------------------------------------------------
     function createSettingsPanel() {
-        if (document.getElementById('tiktok-fix-panel')) return;
+        if (!document.body || document.getElementById('tiktok-fix-panel')) return;
 
         let panel = document.createElement('div');
         panel.id = 'tiktok-fix-panel';
@@ -812,8 +1244,15 @@
             <div style="margin-bottom: 12px;">
                 <label style="display: block; font-size: 11px; color: rgba(255,255,255,0.55); margin-bottom: 4px; font-weight: 600;">Регион подключения</label>
                 <select id="tf-region" style="width: 100%; background: #252533; color: #fff; border: 1px solid #3d3d50; border-radius: 6px; padding: 8px 10px; font-size: 13px; outline: none; cursor: pointer;">
+                    <option value="DE">Германия (DE)</option>
+                    <option value="NL">Нидерланды (NL)</option>
                     <option value="FR">Франция (FR)</option>
                     <option value="US">США (US)</option>
+                    <option value="GB">Великобритания (GB)</option>
+                    <option value="PL">Польша (PL)</option>
+                    <option value="SE">Швеция (SE)</option>
+                    <option value="JP">Япония (JP)</option>
+                    <option value="SG">Сингапур (SG)</option>
                     <option value="DIRECT">Россия (Прямой)</option>
                 </select>
                 <button id="tf-reconnect" style="width: 100%; background: #252533; color: #fff; border: 1px solid #3d3d50; border-radius: 6px; padding: 8px; font-size: 12px; font-weight: 600; cursor: pointer; margin-top: 6px;">Переподключиться</button>
@@ -836,20 +1275,16 @@
             </div>
 
             <div style="margin-bottom: 12px;">
-                <label style="display: block; font-size: 11px; color: rgba(255,255,255,0.55); margin-bottom: 4px; font-weight: 600;">Действия с текущим видео</label>
+                <label style="display: block; font-size: 11px; color: rgba(255,255,255,0.55); margin-bottom: 4px; font-weight: 600;">Скачать медиа</label>
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px;">
                     <button id="tf-download" style="background: #fe2c55; border: none; color: #fff; border-radius: 6px; padding: 8px; font-size: 12px; font-weight: 600; cursor: pointer;">Видео (MP4)</button>
                     <button id="tf-download-audio" style="background: #252533; border: 1px solid #3d3d50; color: #fff; border-radius: 6px; padding: 8px; font-size: 12px; font-weight: 600; cursor: pointer;">Звук (MP3)</button>
-                </div>
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 6px;">
-                    <button id="tf-copy-desc" style="background: #252533; border: 1px solid #3d3d50; color: #fff; border-radius: 6px; padding: 7px; font-size: 12px; font-weight: 600; cursor: pointer;">Копир. текст</button>
-                    <button id="tf-trans-desc" style="background: #252533; border: 1px solid #3d3d50; color: #fff; border-radius: 6px; padding: 7px; font-size: 12px; font-weight: 600; cursor: pointer;">Перевести</button>
                 </div>
                 <button id="tf-clear" style="width: 100%; background: #1f1f2b; color: #aaa; border: 1px solid #303040; border-radius: 6px; padding: 6px; font-size: 11px; cursor: pointer; margin-top: 8px;">Очистить кэш браузера</button>
             </div>
 
             <div style="font-size: 11px; color: rgba(255,255,255,0.45); margin-top: 8px; border-top: 1px solid rgba(255,255,255,0.06); padding-top: 8px; line-height: 1.4;">
-                Клавиши: ←/→ (5 сек), [/] (скорость), P (PiP), Колесико (звук)
+                Клавиши: ←/→ (3 сек), [/] (скорость), P (PiP режим), Колесико (звук)
             </div>
         `;
         document.body.appendChild(panel);
@@ -861,30 +1296,30 @@
 
         document.getElementById('tf-region').onchange = (e) => {
             currentRegion = e.target.value;
-            localStorage.setItem("tf_region", currentRegion);
-            fetch(`http://127.0.0.1:28889/api/set_region?code=${currentRegion}`).then(() => location.reload()).catch(() => location.reload());
+            safeStorageSet("tf_region", currentRegion);
+            fetch(`/api/set_region?code=${currentRegion}`).then(() => location.reload()).catch(() => location.reload());
         };
         document.getElementById('tf-reconnect').onclick = () => {
-            fetch('http://127.0.0.1:28889/api/reconnect').then(() => setTimeout(() => location.reload(), 500)).catch(() => location.reload());
+            callFixApi('/api/reconnect').then(() => setTimeout(() => location.reload(), 500)).catch(() => location.reload());
         };
         document.getElementById('tf-clear').onclick = () => {
             if (confirm('Сбросить кэш и обновить сессию?')) {
-                fetch('http://127.0.0.1:28889/api/clear_cache').then(() => location.reload()).catch(() => location.reload());
+                callFixApi('/api/clear_cache').then(() => location.reload()).catch(() => location.reload());
             }
         };
         document.getElementById('tf-cb-ads').onchange = (e) => {
             blockAds = e.target.checked;
-            localStorage.setItem("tf_block_ads", blockAds);
+            safeStorageSet("tf_block_ads", blockAds);
             filterContent();
         };
         document.getElementById('tf-cb-streams').onchange = (e) => {
             blockStreams = e.target.checked;
-            localStorage.setItem("tf_block_streams", blockStreams);
+            safeStorageSet("tf_block_streams", blockStreams);
             filterContent();
         };
         document.getElementById('tf-cb-photos').onchange = (e) => {
             blockPhotos = e.target.checked;
-            localStorage.setItem("tf_block_photos", blockPhotos);
+            safeStorageSet("tf_block_photos", blockPhotos);
             filterContent();
         };
         document.getElementById('tf-download').onclick = () => {
@@ -892,12 +1327,6 @@
         };
         document.getElementById('tf-download-audio').onclick = () => {
             downloadCurrentAudio(document.getElementById('tf-download-audio'));
-        };
-        document.getElementById('tf-copy-desc').onclick = () => {
-            copyCurrentDescription(document.getElementById('tf-copy-desc'));
-        };
-        document.getElementById('tf-trans-desc').onclick = () => {
-            translateCurrentDescription(document.getElementById('tf-trans-desc'));
         };
     }
 
@@ -913,7 +1342,440 @@
     }
 
     // -------------------------------------------------------------
-    // 10. Global Keyboard Hotkeys
+    // 9. Feed Navigation (Next / Previous Video)
+    // -------------------------------------------------------------
+    function dispatchNavKey(code, key, keyCode) {
+        let opts = {
+            key: key,
+            code: code,
+            keyCode: keyCode,
+            which: keyCode,
+            bubbles: true,
+            cancelable: true,
+            view: window
+        };
+        let el = document.activeElement || document.body;
+        el.dispatchEvent(new KeyboardEvent('keydown', opts));
+        window.dispatchEvent(new KeyboardEvent('keydown', opts));
+        document.dispatchEvent(new KeyboardEvent('keydown', opts));
+        el.dispatchEvent(new KeyboardEvent('keyup', opts));
+        window.dispatchEvent(new KeyboardEvent('keyup', opts));
+        document.dispatchEvent(new KeyboardEvent('keyup', opts));
+    }
+
+    function scrollNextVideo() {
+        if (activePipWindow && currentPipVideo) {
+            detachPipVideo();
+        }
+
+        let nextBtn = document.querySelector('button[data-e2e="arrow-right"], button[data-e2e="navigation-down"], button[data-e2e="arrow-down"], button[aria-label*="Next"], button[aria-label*="Следующ"], button[aria-label*="next"]');
+        if (nextBtn) {
+            nextBtn.click();
+        } else {
+            dispatchNavKey('ArrowDown', 'ArrowDown', 40);
+            let v = getActiveVideo();
+            let card = v ? (v.closest('[data-e2e="recommend-list-item-container"]') || v.closest('div[class*="ItemContainer"]') || v.closest('div[data-e2e="feed-item"]')) : null;
+            if (card && card.nextElementSibling) {
+                card.nextElementSibling.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            } else {
+                window.scrollBy({ top: window.innerHeight * 0.9, behavior: 'smooth' });
+            }
+        }
+
+        if (activePipWindow && !activePipWindow.closed) {
+            attachNextVideoToPip(activePipWindow);
+        }
+    }
+
+    function scrollPrevVideo() {
+        if (activePipWindow && currentPipVideo) {
+            detachPipVideo();
+        }
+
+        let prevBtn = document.querySelector('button[data-e2e="arrow-left"], button[data-e2e="navigation-up"], button[data-e2e="arrow-up"], button[aria-label*="Previous"], button[aria-label*="Предыдущ"], button[aria-label*="prev"]');
+        if (prevBtn) {
+            prevBtn.click();
+        } else {
+            dispatchNavKey('ArrowUp', 'ArrowUp', 38);
+            let v = getActiveVideo();
+            let card = v ? (v.closest('[data-e2e="recommend-list-item-container"]') || v.closest('div[class*="ItemContainer"]') || v.closest('div[data-e2e="feed-item"]')) : null;
+            if (card && card.previousElementSibling) {
+                card.previousElementSibling.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            } else {
+                window.scrollBy({ top: -window.innerHeight * 0.9, behavior: 'smooth' });
+            }
+        }
+
+        if (activePipWindow && !activePipWindow.closed) {
+            attachNextVideoToPip(activePipWindow);
+        }
+    }
+
+    function attachNextVideoToPip(pipWin) {
+        let oldVideo = currentPipVideo;
+        let attempts = 0;
+        let poll = setInterval(() => {
+            attempts++;
+            let v = getActiveVideo();
+            if ((v && v !== oldVideo) || attempts > 16) {
+                clearInterval(poll);
+                if (v && pipWin && !pipWin.closed) {
+                    attachPipVideo(pipWin, v);
+                }
+            }
+        }, 50);
+    }
+
+    // -------------------------------------------------------------
+    // 10. Picture-in-Picture with Interactive Feed Scrolling
+    // -------------------------------------------------------------
+    let activePipWindow = null;
+    let currentPipVideo = null;
+    let pipPlaceholder = null;
+
+    function detachPipVideo() {
+        if (currentPipVideo) {
+            if (pipPlaceholder && pipPlaceholder.parentNode) {
+                pipPlaceholder.parentNode.insertBefore(currentPipVideo, pipPlaceholder);
+                pipPlaceholder.remove();
+            }
+            currentPipVideo.style.width = '';
+            currentPipVideo.style.height = '';
+            currentPipVideo.style.maxWidth = '';
+            currentPipVideo.style.maxHeight = '';
+            currentPipVideo.style.objectFit = '';
+            currentPipVideo.style.outline = '';
+        }
+        currentPipVideo = null;
+        pipPlaceholder = null;
+    }
+
+    function attachPipVideo(pipWin, v) {
+        if (!pipWin || pipWin.closed || !v) return;
+
+        detachPipVideo();
+
+        currentPipVideo = v;
+        let parent = v.parentNode;
+        pipPlaceholder = document.createElement('div');
+        pipPlaceholder.id = 'tf-pip-placeholder';
+        pipPlaceholder.style.display = 'contents';
+        parent.insertBefore(pipPlaceholder, v);
+
+        let container = pipWin.document.getElementById('pip-video-container');
+        if (container) {
+            let oldV = container.querySelector('video');
+            if (oldV && oldV !== v) oldV.remove();
+
+            v.style.cssText = 'width: 100% !important; height: 100% !important; max-width: 100% !important; max-height: 100% !important; object-fit: contain !important; outline: none !important; background: #000;';
+            container.insertBefore(v, container.firstChild);
+
+            try {
+                if (v.paused) v.play();
+            } catch (e) {}
+        }
+
+        v.onended = () => {
+            if (activePipWindow && !activePipWindow.closed) {
+                scrollNextVideo();
+            }
+        };
+    }
+
+    async function openDocumentPip(initialVideo) {
+        let width = 380;
+        let height = 620;
+
+        const pipWin = await window.documentPictureInPicture.requestWindow({
+            width: width,
+            height: height
+        });
+
+        activePipWindow = pipWin;
+        pipWin.document.title = 'TikTok Fix';
+
+        let style = pipWin.document.createElement('style');
+        style.textContent = `
+            * { box-sizing: border-box; margin: 0; padding: 0; }
+            body {
+                background: #000;
+                color: #fff;
+                overflow: hidden;
+                width: 100vw;
+                height: 100vh;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                justify-content: center;
+                font-family: TikTokSans, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+                user-select: none;
+            }
+            #pip-video-container {
+                width: 100%;
+                height: 100%;
+                position: relative;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                background: #000;
+            }
+            .pip-overlay {
+                position: absolute;
+                inset: 0;
+                display: flex;
+                flex-direction: column;
+                justify-content: space-between;
+                align-items: center;
+                padding: 10px;
+                pointer-events: none;
+                opacity: 0;
+                transition: opacity 0.25s ease;
+                background: linear-gradient(180deg, rgba(0,0,0,0.55) 0%, transparent 20%, transparent 80%, rgba(0,0,0,0.65) 100%);
+            }
+            #pip-video-container:hover .pip-overlay {
+                opacity: 1;
+            }
+            .pip-nav-btn {
+                pointer-events: auto;
+                background: rgba(22, 24, 35, 0.75);
+                backdrop-filter: blur(12px);
+                border: 1px solid rgba(255, 255, 255, 0.15);
+                color: #fff;
+                border-radius: 20px;
+                padding: 6px 14px;
+                font-size: 12px;
+                font-weight: 600;
+                cursor: pointer;
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+                transition: background 0.15s, transform 0.15s, border-color 0.15s;
+            }
+            .pip-nav-btn:hover {
+                background: rgba(254, 44, 85, 0.9);
+                border-color: #fe2c55;
+                transform: scale(1.04);
+            }
+            .pip-nav-btn:active {
+                transform: scale(0.96);
+            }
+            .pip-toast {
+                position: absolute;
+                top: 50%;
+                left: 50%;
+                transform: translate(-50%, -50%);
+                background: rgba(0, 0, 0, 0.85);
+                backdrop-filter: blur(8px);
+                color: #fff;
+                border: 1px solid rgba(255, 255, 255, 0.15);
+                padding: 8px 16px;
+                border-radius: 8px;
+                font-size: 13px;
+                font-weight: 600;
+                pointer-events: none;
+                opacity: 0;
+                transition: opacity 0.15s ease;
+                z-index: 99;
+            }
+            .pip-hint {
+                font-size: 11px;
+                color: rgba(255, 255, 255, 0.6);
+                background: rgba(0,0,0,0.5);
+                padding: 2px 7px;
+                border-radius: 8px;
+                margin-left: 4px;
+            }
+        `;
+        pipWin.document.head.appendChild(style);
+
+        let container = pipWin.document.createElement('div');
+        container.id = 'pip-video-container';
+
+        let overlay = pipWin.document.createElement('div');
+        overlay.className = 'pip-overlay';
+        overlay.innerHTML = `
+            <button class="pip-nav-btn" id="pip-prev">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M12 4l-8 8h16z"/></svg>
+                Пред. видео
+                <span class="pip-hint">↑ или Колесико вверх</span>
+            </button>
+            <div class="pip-toast" id="pip-toast"></div>
+            <button class="pip-nav-btn" id="pip-next">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M12 20l8-8H4z"/></svg>
+                След. видео
+                <span class="pip-hint">↓ или Колесико вниз</span>
+            </button>
+        `;
+
+        container.appendChild(overlay);
+        pipWin.document.body.appendChild(container);
+
+        let toastEl = overlay.querySelector('#pip-toast');
+        let toastTimer = null;
+        function showToast(msg) {
+            if (!toastEl) return;
+            toastEl.textContent = msg;
+            toastEl.style.opacity = '1';
+            clearTimeout(toastTimer);
+            toastTimer = setTimeout(() => {
+                if (toastEl) toastEl.style.opacity = '0';
+            }, 1200);
+        }
+
+        attachPipVideo(pipWin, initialVideo);
+
+        overlay.querySelector('#pip-prev').onclick = (e) => {
+            e.stopPropagation();
+            showToast('▲ Предыдущее');
+            scrollPrevVideo();
+        };
+        overlay.querySelector('#pip-next').onclick = (e) => {
+            e.stopPropagation();
+            showToast('▼ Следующее');
+            scrollNextVideo();
+        };
+
+        // Mouse wheel over PiP window scrolls the feed
+        let lastWheelTime = 0;
+        pipWin.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            let now = Date.now();
+            if (now - lastWheelTime < 320) return;
+            lastWheelTime = now;
+
+            if (e.deltaY > 0) {
+                showToast('▼ Следующее');
+                scrollNextVideo();
+            } else if (e.deltaY < 0) {
+                showToast('▲ Предыдущее');
+                scrollPrevVideo();
+            }
+        }, { passive: false });
+
+        // Keydown events inside PiP window (ArrowDown / ArrowUp for feed, Left/Right for rewind, Space for pause)
+        pipWin.addEventListener('keydown', (e) => {
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                e.stopPropagation();
+                showToast('▼ Следующее');
+                scrollNextVideo();
+            } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                e.stopPropagation();
+                showToast('▲ Предыдущее');
+                scrollPrevVideo();
+            } else if (e.key === 'ArrowLeft') {
+                e.preventDefault();
+                let v = currentPipVideo;
+                if (v) {
+                    v.currentTime = Math.max(0, v.currentTime - 3);
+                    showToast('◄◄ 3 сек');
+                }
+            } else if (e.key === 'ArrowRight') {
+                e.preventDefault();
+                let v = currentPipVideo;
+                if (v) {
+                    v.currentTime = Math.min(v.duration || 9999, v.currentTime + 3);
+                    showToast('3 сек ►►');
+                }
+            } else if (e.key === ' ' || e.code === 'Space') {
+                e.preventDefault();
+                let v = currentPipVideo;
+                if (v) {
+                    if (v.paused) { v.play(); showToast('Воспроизведение'); }
+                    else { v.pause(); showToast('Пауза'); }
+                }
+            } else if (e.key === '[' || e.code === 'BracketLeft') {
+                e.preventDefault();
+                let v = currentPipVideo;
+                if (v) {
+                    let speeds = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
+                    let cur = v.playbackRate || 1.0;
+                    let idx = speeds.findIndex(s => Math.abs(s - cur) < 0.05);
+                    if (idx === -1) idx = 2;
+                    let nextIdx = Math.max(0, idx - 1);
+                    v.playbackRate = speeds[nextIdx];
+                    showToast(`${speeds[nextIdx]}x`);
+                }
+            } else if (e.key === ']' || e.code === 'BracketRight') {
+                e.preventDefault();
+                let v = currentPipVideo;
+                if (v) {
+                    let speeds = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
+                    let cur = v.playbackRate || 1.0;
+                    let idx = speeds.findIndex(s => Math.abs(s - cur) < 0.05);
+                    if (idx === -1) idx = 2;
+                    let nextIdx = Math.min(speeds.length - 1, idx + 1);
+                    v.playbackRate = speeds[nextIdx];
+                    showToast(`${speeds[nextIdx]}x`);
+                }
+            } else if (e.key === 'p' || e.key === 'P' || e.key === 'Escape') {
+                e.preventDefault();
+                pipWin.close();
+            }
+        });
+
+        pipWin.addEventListener('pagehide', () => {
+            detachPipVideo();
+            activePipWindow = null;
+            showVideoToast('PiP закрыт');
+        });
+
+        showVideoToast('Картинка в картинке');
+    }
+
+    async function togglePictureInPicture() {
+        let v = getActiveVideo();
+        if (!v) {
+            showVideoToast('Видео не найдено');
+            return;
+        }
+
+        if (activePipWindow && !activePipWindow.closed) {
+            activePipWindow.close();
+            return;
+        }
+
+        if (document.pictureInPictureElement) {
+            document.exitPictureInPicture().catch(() => {});
+            return;
+        }
+
+        if ('documentPictureInPicture' in window) {
+            try {
+                await openDocumentPip(v);
+                return;
+            } catch (err) {
+                console.warn('[TikTok Fix] Document PiP failed, fallback to video PiP:', err);
+            }
+        }
+
+        if (document.pictureInPictureEnabled) {
+            try {
+                await v.requestPictureInPicture();
+                showVideoToast('Картинка в картинке');
+            } catch (err) {
+                showVideoToast('Ошибка PiP');
+            }
+        }
+    }
+
+    // MediaSession navigation buttons for standard PiP
+    if ('mediaSession' in navigator) {
+        try {
+            navigator.mediaSession.setActionHandler('nexttrack', () => {
+                scrollNextVideo();
+            });
+            navigator.mediaSession.setActionHandler('previoustrack', () => {
+                scrollPrevVideo();
+            });
+        } catch (e) {}
+    }
+
+    // -------------------------------------------------------------
+    // 11. Global Keyboard Hotkeys
     // -------------------------------------------------------------
     window.addEventListener('keydown', function(e) {
         let isRightAlt = (e.code === 'AltRight' || e.key === 'AltGraph' || (e.key === 'Alt' && e.location === 2));
@@ -935,24 +1797,8 @@
 
         let v = getActiveVideo();
 
-        // ArrowLeft: Rewind 5s
-        if (e.key === 'ArrowLeft' || e.code === 'ArrowLeft') {
-            if (v) {
-                e.preventDefault();
-                v.currentTime = Math.max(0, v.currentTime - 5);
-                showVideoToast('◄◄ 5 сек');
-            }
-        }
-        // ArrowRight: Forward 5s
-        else if (e.key === 'ArrowRight' || e.code === 'ArrowRight') {
-            if (v) {
-                e.preventDefault();
-                v.currentTime = Math.min(v.duration || 9999, v.currentTime + 5);
-                showVideoToast('5 сек ►►');
-            }
-        }
         // BracketLeft '[': Slow down
-        else if (e.key === '[' || e.code === 'BracketLeft') {
+        if (e.key === '[' || e.code === 'BracketLeft') {
             if (v) {
                 e.preventDefault();
                 let speeds = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
@@ -979,27 +1825,22 @@
         }
         // Key P: Picture-in-Picture
         else if (e.key === 'p' || e.key === 'P' || e.code === 'KeyP') {
-            if (v) {
-                e.preventDefault();
-                if (document.pictureInPictureElement) {
-                    document.exitPictureInPicture().then(() => showVideoToast('PiP выключен')).catch(() => {});
-                } else if (document.pictureInPictureEnabled) {
-                    v.requestPictureInPicture().then(() => showVideoToast('Картинка в картинке')).catch(() => {});
-                }
-            }
+            e.preventDefault();
+            togglePictureInPicture();
         }
     }, true);
 
-    // Global Tick called continuously
+    // Global Tick called continuously (isolated in try-catch so no error can ever break other functions)
     window.tikTokFixTick = function() {
-        createSettingsPanel();
-        updateFabSettingsButton();
-        updateSettingsPage();
-        updateVideoDates();
-        updateRepostTab();
-        cleanupProfileBanners();
-        filterContent();
-        bindVideoVolume();
+        if (!document.body) return;
+        try { createSettingsPanel(); } catch(e) { console.error('[TikTok Fix] createSettingsPanel error:', e); }
+        try { updateFabSettingsButton(); } catch(e) { console.error('[TikTok Fix] updateFabSettingsButton error:', e); }
+        try { updateSettingsPage(); } catch(e) { console.error('[TikTok Fix] updateSettingsPage error:', e); }
+        try { updateVideoDates(); } catch(e) { console.error('[TikTok Fix] updateVideoDates error:', e); }
+        try { updateRepostTab(); } catch(e) { console.error('[TikTok Fix] updateRepostTab error:', e); }
+        try { cleanupProfileBanners(); } catch(e) { console.error('[TikTok Fix] cleanupProfileBanners error:', e); }
+        try { filterContent(); } catch(e) { console.error('[TikTok Fix] filterContent error:', e); }
+        try { bindVideoVolume(); } catch(e) { console.error('[TikTok Fix] bindVideoVolume error:', e); }
     };
 
     // Run interval

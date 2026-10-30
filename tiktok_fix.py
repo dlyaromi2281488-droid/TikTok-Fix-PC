@@ -18,9 +18,15 @@ import threading
 import json
 import socket
 import urllib.parse
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 import websockets
 import asyncio
+
+if sys.platform == "win32":
+    try:
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    except Exception:
+        pass
 
 # Import proxy relay
 from tiktok_relay import TikTokProxyRelay
@@ -31,8 +37,9 @@ DEBUG_PORT = 9222
 
 relay = TikTokProxyRelay(bind_host="127.0.0.1", bind_port=RELAY_PORT)
 
-class ReusableHTTPServer(HTTPServer):
+class ReusableHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
+    daemon_threads = True
 
 class ApiHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
@@ -43,7 +50,34 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', '*')
+        self.send_header('Access-Control-Allow-Private-Network', 'true')
         self.end_headers()
+
+    def do_POST(self):
+        parsed = urllib.parse.urlparse(self.path)
+        qs = urllib.parse.parse_qs(parsed.query)
+
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Private-Network', 'true')
+        self.end_headers()
+
+        resp = {"success": True}
+        if parsed.path == "/api/save_file":
+            try:
+                fname = qs.get("name", [f"TikTok_{int(time.time())}.mp4"])[0]
+                length = int(self.headers.get("Content-Length", 0))
+                data = self.rfile.read(length) if length > 0 else b""
+                downloads_dir = os.path.join(os.path.expanduser("~"), "Downloads")
+                out_path = os.path.join(downloads_dir, fname)
+                with open(out_path, "wb") as f:
+                    f.write(data)
+                resp = {"success": True, "filename": fname, "bytes": len(data)}
+            except Exception as e:
+                resp = {"success": False, "error": str(e)}
+
+        self.wfile.write(json.dumps(resp).encode('utf-8'))
 
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
@@ -52,6 +86,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-Type', 'application/json; charset=utf-8')
         self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Private-Network', 'true')
         self.end_headers()
 
         resp = {"success": True}
@@ -77,191 +112,201 @@ class ApiHandler(BaseHTTPRequestHandler):
             resp["cleared"] = True
 
         elif parsed.path == "/api/download":
+            video_id = qs.get("id", [""])[0]
             page_url = qs.get("page", [""])[0]
             video_src = qs.get("src", [""])[0]
+            raw_urls = qs.get("urls", ["[]"])[0]
+            author = qs.get("author", [""])[0]
+            cookie_str = qs.get("cookie", [""])[0]
             try:
+                candidate_urls = []
+                if video_src and video_src.startswith("http") and not video_src.startswith("blob:"):
+                    candidate_urls.append(video_src)
+                try:
+                    import json
+                    parsed_urls = json.loads(raw_urls)
+                    if isinstance(parsed_urls, list):
+                        for u in parsed_urls:
+                            if u and isinstance(u, str) and u.startswith("http") and not u.startswith("blob:") and u not in candidate_urls:
+                                candidate_urls.append(u)
+                except Exception:
+                    pass
+
                 downloads_dir = os.path.join(os.path.expanduser("~"), "Downloads")
-                timestamp = int(time.time())
-                filename = f"TikTok_{timestamp}.mp4"
+                name_id = video_id if video_id else int(time.time())
+                filename = f"TikTok_{name_id}.mp4"
                 out_path = os.path.join(downloads_dir, filename)
                 download_success = False
 
-                # 1. Direct CDN link download with TikTok Referer
-                if video_src and video_src.startswith("http") and not video_src.startswith("blob:"):
-                    import requests
-                    headers = {
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-                        "Referer": "https://www.tiktok.com/",
-                        "Range": "bytes=0-"
-                    }
-                    try:
-                        r = requests.get(video_src, headers=headers, stream=True, timeout=25)
-                        if r.status_code in [200, 206]:
-                            with open(out_path, "wb") as f:
-                                for chunk in r.iter_content(chunk_size=65536):
-                                    f.write(chunk)
-                            if os.path.exists(out_path) and os.path.getsize(out_path) > 30000:
-                                download_success = True
-                                resp = {"success": True, "filename": filename}
-                    except Exception:
-                        pass
+                relay_proxies = {
+                    "http": f"socks5h://127.0.0.1:{RELAY_PORT}",
+                    "https": f"socks5h://127.0.0.1:{RELAY_PORT}"
+                }
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+                    "Referer": "https://www.tiktok.com/",
+                }
+                if cookie_str:
+                    headers["Cookie"] = cookie_str
 
-                # 2. yt-dlp fallback with proxy relay
-                if not download_success and page_url:
-                    try:
-                        import yt_dlp
-                        ydl_opts = {
-                            'outtmpl': out_path,
-                            'proxy': f'socks5://127.0.0.1:{RELAY_PORT}',
-                            'quiet': True,
-                            'no_warnings': True,
-                        }
-                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                            ydl.download([page_url])
-                        if os.path.exists(out_path) and os.path.getsize(out_path) > 30000:
-                            download_success = True
-                            resp = {"success": True, "filename": filename}
-                    except Exception:
-                        pass
+                # 1. Direct CDN stream download (Try direct first for unblocked line-speed, then proxy)
+                import requests
+                for v_url in candidate_urls:
+                    for proxy in [None, relay_proxies]:
+                        try:
+                            r = requests.get(v_url, headers=headers, proxies=proxy, stream=True, timeout=8, allow_redirects=True)
+                            if r.status_code in [200, 206]:
+                                with open(out_path, "wb") as f:
+                                    for chunk in r.iter_content(chunk_size=262144):
+                                        f.write(chunk)
+                                if os.path.exists(out_path) and os.path.getsize(out_path) > 30000:
+                                    download_success = True
+                                    resp = {"success": True, "filename": filename}
+                                    break
+                        except Exception:
+                            continue
+                    if download_success:
+                        break
 
-                # 3. yt-dlp direct fallback
-                if not download_success and page_url:
-                    try:
-                        import yt_dlp
-                        ydl_opts = {
-                            'outtmpl': out_path,
-                            'quiet': True,
-                            'no_warnings': True,
-                        }
-                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                            ydl.download([page_url])
-                        if os.path.exists(out_path) and os.path.getsize(out_path) > 30000:
-                            download_success = True
-                            resp = {"success": True, "filename": filename}
-                    except Exception:
-                        pass
+                # 2. yt-dlp fallback (with constructed single-video URL if needed)
+                if not download_success:
+                    target_url = None
+                    if page_url and "/video/" in page_url:
+                        target_url = page_url
+                    elif video_id:
+                        user_str = author if author else "tiktok"
+                        target_url = f"https://www.tiktok.com/@{user_str}/video/{video_id}"
+
+                    if target_url:
+                        try:
+                            import yt_dlp
+                            out_template = os.path.join(downloads_dir, f"TikTok_{name_id}.%(ext)s")
+                            ydl_opts = {
+                                'outtmpl': out_template,
+                                'proxy': f'socks5://127.0.0.1:{RELAY_PORT}',
+                                'quiet': True,
+                                'no_warnings': True,
+                                'socket_timeout': 15,
+                            }
+                            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                                ydl.download([target_url])
+                            for ext in ['mp4', 'webm', 'mkv']:
+                                cand = os.path.join(downloads_dir, f"TikTok_{name_id}.{ext}")
+                                if os.path.exists(cand) and os.path.getsize(cand) > 30000:
+                                    download_success = True
+                                    resp = {"success": True, "filename": os.path.basename(cand)}
+                                    break
+                        except Exception:
+                            pass
 
                 if not download_success:
-                    resp = {"success": False, "error": "Не удалось получить файл видео. Откройте видео на отдельной вкладке и повторите попытку."}
+                    resp = {"success": False, "error": "Не удалось загрузить видео."}
 
             except Exception as e:
                 resp = {"success": False, "error": str(e)}
 
         elif parsed.path == "/api/download_audio":
+            video_id = qs.get("id", [""])[0]
             page_url = qs.get("page", [""])[0]
-            audio_src = qs.get("audio_src", [""])[0]
             video_src = qs.get("src", [""])[0]
+            audio_src = qs.get("audio_src", [""])[0]
+            raw_urls = qs.get("urls", ["[]"])[0]
+            author = qs.get("author", [""])[0]
+            cookie_str = qs.get("cookie", [""])[0]
             try:
+                candidate_urls = []
+                if audio_src and audio_src.startswith("http") and not audio_src.startswith("blob:"):
+                    candidate_urls.append(audio_src)
+                try:
+                    import json
+                    parsed_urls = json.loads(raw_urls)
+                    if isinstance(parsed_urls, list):
+                        for u in parsed_urls:
+                            if u and isinstance(u, str) and u.startswith("http") and not u.startswith("blob:") and u not in candidate_urls:
+                                candidate_urls.append(u)
+                except Exception:
+                    pass
+
                 downloads_dir = os.path.join(os.path.expanduser("~"), "Downloads")
-                timestamp = int(time.time())
-                filename = f"TikTok_Audio_{timestamp}.mp3"
+                name_id = video_id if video_id else int(time.time())
+                filename = f"TikTok_Audio_{name_id}.mp3"
                 out_path = os.path.join(downloads_dir, filename)
                 download_success = False
 
-                # 1. Direct audio CDN link download
-                if audio_src and audio_src.startswith("http") and not audio_src.startswith("blob:"):
-                    import requests
-                    headers = {
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-                        "Referer": "https://www.tiktok.com/",
-                        "Range": "bytes=0-"
-                    }
-                    try:
-                        r = requests.get(audio_src, headers=headers, stream=True, timeout=25)
-                        if r.status_code in [200, 206]:
-                            with open(out_path, "wb") as f:
-                                for chunk in r.iter_content(chunk_size=65536):
-                                    f.write(chunk)
-                            if os.path.exists(out_path) and os.path.getsize(out_path) > 10000:
-                                download_success = True
-                                resp = {"success": True, "filename": filename}
-                    except Exception:
-                        pass
+                relay_proxies = {
+                    "http": f"socks5h://127.0.0.1:{RELAY_PORT}",
+                    "https": f"socks5h://127.0.0.1:{RELAY_PORT}"
+                }
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+                    "Referer": "https://www.tiktok.com/",
+                }
+                if cookie_str:
+                    headers["Cookie"] = cookie_str
 
-                # 2. Extract audio via yt-dlp with proxy
-                if not download_success and page_url:
-                    try:
-                        import yt_dlp
-                        out_template = os.path.join(downloads_dir, f"TikTok_Audio_{timestamp}.%(ext)s")
-                        ydl_opts = {
-                            'format': 'bestaudio/best',
-                            'outtmpl': out_template,
-                            'proxy': f'socks5://127.0.0.1:{RELAY_PORT}',
-                            'postprocessors': [{
-                                'key': 'FFmpegExtractAudio',
-                                'preferredcodec': 'mp3',
-                                'preferredquality': '192',
-                            }],
-                            'quiet': True,
-                            'no_warnings': True,
-                        }
-                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                            ydl.download([page_url])
-                        if os.path.exists(out_path) and os.path.getsize(out_path) > 10000:
-                            download_success = True
-                            resp = {"success": True, "filename": filename}
-                    except Exception:
-                        pass
+                # 1. Direct audio CDN link download (FAST: <1s!) - Try direct first, then proxy
+                import requests
+                for a_url in candidate_urls:
+                    for proxy in [None, relay_proxies]:
+                        try:
+                            r = requests.get(a_url, headers=headers, proxies=proxy, stream=True, timeout=8, allow_redirects=True)
+                            if r.status_code in [200, 206]:
+                                with open(out_path, "wb") as f:
+                                    for chunk in r.iter_content(chunk_size=131072):
+                                        f.write(chunk)
+                                if os.path.exists(out_path) and os.path.getsize(out_path) > 5000:
+                                    download_success = True
+                                    resp = {"success": True, "filename": filename}
+                                    break
+                        except Exception:
+                            continue
+                    if download_success:
+                        break
 
-                # 3. Direct yt-dlp fallback
-                if not download_success and page_url:
-                    try:
-                        import yt_dlp
-                        out_template = os.path.join(downloads_dir, f"TikTok_Audio_{timestamp}.%(ext)s")
-                        ydl_opts = {
-                            'format': 'bestaudio/best',
-                            'outtmpl': out_template,
-                            'postprocessors': [{
-                                'key': 'FFmpegExtractAudio',
-                                'preferredcodec': 'mp3',
-                                'preferredquality': '192',
-                            }],
-                            'quiet': True,
-                            'no_warnings': True,
-                        }
-                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                            ydl.download([page_url])
-                        if os.path.exists(out_path) and os.path.getsize(out_path) > 10000:
-                            download_success = True
-                            resp = {"success": True, "filename": filename}
-                    except Exception:
-                        pass
+                # 2. Extract audio from video_src or page_url via yt-dlp
+                if not download_success:
+                    target_url = None
+                    if page_url and "/video/" in page_url:
+                        target_url = page_url
+                    elif video_src and video_src.startswith("http") and not video_src.startswith("blob:"):
+                        target_url = video_src
+                    elif video_id:
+                        user_str = author if author else "tiktok"
+                        target_url = f"https://www.tiktok.com/@{user_str}/video/{video_id}"
+
+                    if target_url:
+                        try:
+                            import yt_dlp
+                            out_template = os.path.join(downloads_dir, f"TikTok_Audio_{name_id}.%(ext)s")
+                            ydl_opts = {
+                                'format': 'bestaudio/best',
+                                'outtmpl': out_template,
+                                'proxy': f'socks5://127.0.0.1:{RELAY_PORT}',
+                                'postprocessors': [{
+                                    'key': 'FFmpegExtractAudio',
+                                    'preferredcodec': 'mp3',
+                                    'preferredquality': '192',
+                                }],
+                                'quiet': True,
+                                'no_warnings': True,
+                                'socket_timeout': 15,
+                            }
+                            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                                ydl.download([target_url])
+                            for ext in ['mp3', 'm4a', 'aac', 'ogg']:
+                                cand = os.path.join(downloads_dir, f"TikTok_Audio_{name_id}.{ext}")
+                                if os.path.exists(cand) and os.path.getsize(cand) > 5000:
+                                    download_success = True
+                                    resp = {"success": True, "filename": os.path.basename(cand)}
+                                    break
+                        except Exception:
+                            pass
 
                 if not download_success:
-                    resp = {"success": False, "error": "Не удалось скачать аудиодорожку."}
+                    resp = {"success": False, "error": "Не удалось загрузить аудио."}
 
             except Exception as e:
                 resp = {"success": False, "error": str(e)}
-
-        elif parsed.path == "/api/translate":
-            text = qs.get("text", [""])[0]
-            target_lang = qs.get("to", ["ru"])[0]
-            translated = ""
-            if text:
-                try:
-                    import urllib.request, urllib.parse, json
-                    url = 'https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl=auto&tl=' + target_lang + '&q=' + urllib.parse.quote(text)
-                    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
-                    with urllib.request.urlopen(req, timeout=6) as r_trans:
-                        data = json.loads(r_trans.read().decode('utf-8'))
-                        if isinstance(data, list) and len(data) > 0:
-                            if isinstance(data[0], list):
-                                translated = data[0][0]
-                            else:
-                                translated = data[0]
-                except Exception:
-                    pass
-                if not translated:
-                    try:
-                        import urllib.request, urllib.parse, json
-                        url = f'https://api.mymemory.translated.net/get?q={urllib.parse.quote(text)}&langpair=auto|{target_lang}'
-                        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-                        with urllib.request.urlopen(req, timeout=6) as r_trans:
-                            data = json.loads(r_trans.read().decode('utf-8'))
-                            translated = data.get('responseData', {}).get('translatedText', '')
-                    except Exception:
-                        pass
-            resp = {"success": bool(translated), "translated": translated or text}
 
         self.wfile.write(json.dumps(resp).encode('utf-8'))
 
@@ -276,22 +321,22 @@ def start_api_server():
         except Exception:
             continue
 
-async def inject_tab(ws_url, script_content):
+injected_targets = set()
+
+async def inject_tab(ws_url, script_content, target_id):
     try:
         async with websockets.connect(ws_url, ping_interval=None, close_timeout=2) as ws:
-            # Enable Page domain
-            await ws.send(json.dumps({"id": 1, "method": "Page.enable"}))
-            await ws.recv()
+            if target_id not in injected_targets:
+                await ws.send(json.dumps({"id": 1, "method": "Page.enable"}))
+                await ws.recv()
+                await ws.send(json.dumps({
+                    "id": 2,
+                    "method": "Page.addScriptToEvaluateOnNewDocument",
+                    "params": {"source": script_content}
+                }))
+                await ws.recv()
+                injected_targets.add(target_id)
 
-            # Add to evaluate on new document (persists across full navigations)
-            await ws.send(json.dumps({
-                "id": 2,
-                "method": "Page.addScriptToEvaluateOnNewDocument",
-                "params": {"source": script_content}
-            }))
-            await ws.recv()
-
-            # Execute right now or trigger tick
             eval_js = f"""
             if (!window.TIKTOK_FIX_ACTIVE) {{
                 {script_content}
@@ -318,8 +363,9 @@ def cdp_injector_loop(script_content, stop_event):
             for t in targets:
                 if t.get('type') == 'page' and 'webSocketDebuggerUrl' in t:
                     ws_url = t['webSocketDebuggerUrl']
+                    target_id = t.get('id', ws_url)
                     try:
-                        asyncio.run(inject_tab(ws_url, script_content))
+                        asyncio.run(inject_tab(ws_url, script_content, target_id))
                     except Exception:
                         pass
         except Exception:
@@ -338,21 +384,37 @@ def find_browser():
     return None
 
 def cleanup_stale_processes():
-    """Clean up processes and locks."""
+    """Clean up processes, ports, and locks."""
     try:
         import psutil
         curr_pid = os.getpid()
-        for p in psutil.process_iter(['pid', 'name', 'cmdline']):
+        for p in psutil.process_iter(['pid', 'name']):
             try:
                 if p.info['pid'] == curr_pid:
                     continue
-                cmd = ' '.join(p.info['cmdline'] or [])
-                if 'tiktok_fix_profile' in cmd:
+                cmdline = p.cmdline()
+                cmd = ' '.join(cmdline).lower()
+                if 'tiktok_fix_profile' in cmd or 'tiktok_fix.py' in cmd:
                     p.kill()
             except Exception:
-                pass
+                continue
     except Exception:
         pass
+
+    # Kill any processes still listening on our ports
+    for port in [DEBUG_PORT, RELAY_PORT, API_PORT]:
+        try:
+            import psutil
+            for conn in psutil.net_connections(kind='inet'):
+                if conn.laddr.port == port and conn.pid:
+                    try:
+                        p = psutil.Process(conn.pid)
+                        if p.pid != os.getpid():
+                            p.kill()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     # Remove any Chrome singleton lock files
     base_dir = BASE_DIR
@@ -386,7 +448,8 @@ def main():
         os.makedirs(profile_dir, exist_ok=True)
 
         with open(script_path, "r", encoding="utf-8") as f:
-            script_content = f.read()
+            raw_script = f.read()
+        script_content = f"window.__TIKTOK_FIX_API_PORT__ = {API_PORT};\n" + raw_script
 
         stop_event = threading.Event()
         injector_thread = threading.Thread(target=cdp_injector_loop, args=(script_content, stop_event), daemon=True)
@@ -402,14 +465,35 @@ def main():
             f"--disable-extensions-except={extension_dir}",
             "--enable-extensions",
             "--disable-quic",
-            "--lang=ru-RU,en-US",
+            "--test-type",
+            "--disable-infobars",
             "--no-first-run",
-            "--no-default-browser-check"
+            "--no-default-browser-check",
+            "--disable-blink-features=AutomationControlled",
+            "--lang=ru-RU,en-US"
         ]
 
         try:
             proc = subprocess.Popen(args)
-            proc.wait()
+            time.sleep(2)
+            
+            # Supervise: keep running as long as TikTok Chrome window is open
+            import psutil
+            while True:
+                time.sleep(1.5)
+                chrome_alive = False
+                for p in psutil.process_iter(['name', 'cmdline']):
+                    try:
+                        name = (p.info.get('name') or '').lower()
+                        if 'chrome' in name or 'edge' in name:
+                            cmd = ' '.join(p.info.get('cmdline') or []).lower()
+                            if 'tiktok_fix_profile' in cmd:
+                                chrome_alive = True
+                                break
+                    except Exception:
+                        pass
+                if not chrome_alive:
+                    break
         finally:
             stop_event.set()
             relay.stop()
