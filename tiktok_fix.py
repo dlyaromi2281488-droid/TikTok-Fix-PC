@@ -1,7 +1,10 @@
 import os
 import sys
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if getattr(sys, 'frozen', False):
+    BASE_DIR = os.path.dirname(os.path.abspath(sys.executable))
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 try:
@@ -63,7 +66,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             resp["info"] = relay.get_current_info()
 
         elif parsed.path == "/api/clear_cache":
-            profile_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tiktok_fix_profile")
+            profile_dir = os.path.join(BASE_DIR, "tiktok_fix_profile")
             cache_path = os.path.join(profile_dir, "Default", "Cache")
             if os.path.exists(cache_path):
                 import shutil
@@ -105,15 +108,16 @@ class ApiHandler(BaseHTTPRequestHandler):
 
                 # 2. yt-dlp fallback with proxy relay
                 if not download_success and page_url:
-                    cmd_proxy = [
-                        sys.executable, "-m", "yt_dlp",
-                        "--proxy", f"socks5://127.0.0.1:{RELAY_PORT}",
-                        "--no-warnings",
-                        "-o", out_path,
-                        page_url
-                    ]
                     try:
-                        res = subprocess.run(cmd_proxy, timeout=35, capture_output=True)
+                        import yt_dlp
+                        ydl_opts = {
+                            'outtmpl': out_path,
+                            'proxy': f'socks5://127.0.0.1:{RELAY_PORT}',
+                            'quiet': True,
+                            'no_warnings': True,
+                        }
+                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                            ydl.download([page_url])
                         if os.path.exists(out_path) and os.path.getsize(out_path) > 30000:
                             download_success = True
                             resp = {"success": True, "filename": filename}
@@ -122,14 +126,15 @@ class ApiHandler(BaseHTTPRequestHandler):
 
                 # 3. yt-dlp direct fallback
                 if not download_success and page_url:
-                    cmd_direct = [
-                        sys.executable, "-m", "yt_dlp",
-                        "--no-warnings",
-                        "-o", out_path,
-                        page_url
-                    ]
                     try:
-                        res = subprocess.run(cmd_direct, timeout=25, capture_output=True)
+                        import yt_dlp
+                        ydl_opts = {
+                            'outtmpl': out_path,
+                            'quiet': True,
+                            'no_warnings': True,
+                        }
+                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                            ydl.download([page_url])
                         if os.path.exists(out_path) and os.path.getsize(out_path) > 30000:
                             download_success = True
                             resp = {"success": True, "filename": filename}
@@ -234,7 +239,7 @@ def cleanup_stale_processes():
         pass
 
     # Remove any Chrome singleton lock files
-    base_dir = os.path.dirname(os.path.abspath(__file__))
+    base_dir = BASE_DIR
     profile_dir = os.path.join(base_dir, "tiktok_fix_profile")
     for lock_file in ["SingletonLock", "SingletonCookie", "SingletonSocket"]:
         p = os.path.join(profile_dir, lock_file)
@@ -258,7 +263,7 @@ def main():
             print("Ошибка: Chrome или Edge не найдены.")
             return
 
-        base_dir = os.path.dirname(os.path.abspath(__file__))
+        base_dir = BASE_DIR
         profile_dir = os.path.join(base_dir, "tiktok_fix_profile")
         extension_dir = os.path.join(base_dir, "extension")
         script_path = os.path.join(base_dir, "injected_script.js")
@@ -293,7 +298,7 @@ def main():
             stop_event.set()
             relay.stop()
     except Exception as e:
-        base_dir = os.path.dirname(os.path.abspath(__file__))
+        base_dir = BASE_DIR
         with open(os.path.join(base_dir, "crash.log"), "a", encoding="utf-8") as f:
             import traceback
             f.write(traceback.format_exc() + "\n")
