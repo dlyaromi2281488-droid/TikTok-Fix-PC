@@ -147,6 +147,122 @@ class ApiHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 resp = {"success": False, "error": str(e)}
 
+        elif parsed.path == "/api/download_audio":
+            page_url = qs.get("page", [""])[0]
+            audio_src = qs.get("audio_src", [""])[0]
+            video_src = qs.get("src", [""])[0]
+            try:
+                downloads_dir = os.path.join(os.path.expanduser("~"), "Downloads")
+                timestamp = int(time.time())
+                filename = f"TikTok_Audio_{timestamp}.mp3"
+                out_path = os.path.join(downloads_dir, filename)
+                download_success = False
+
+                # 1. Direct audio CDN link download
+                if audio_src and audio_src.startswith("http") and not audio_src.startswith("blob:"):
+                    import requests
+                    headers = {
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+                        "Referer": "https://www.tiktok.com/",
+                        "Range": "bytes=0-"
+                    }
+                    try:
+                        r = requests.get(audio_src, headers=headers, stream=True, timeout=25)
+                        if r.status_code in [200, 206]:
+                            with open(out_path, "wb") as f:
+                                for chunk in r.iter_content(chunk_size=65536):
+                                    f.write(chunk)
+                            if os.path.exists(out_path) and os.path.getsize(out_path) > 10000:
+                                download_success = True
+                                resp = {"success": True, "filename": filename}
+                    except Exception:
+                        pass
+
+                # 2. Extract audio via yt-dlp with proxy
+                if not download_success and page_url:
+                    try:
+                        import yt_dlp
+                        out_template = os.path.join(downloads_dir, f"TikTok_Audio_{timestamp}.%(ext)s")
+                        ydl_opts = {
+                            'format': 'bestaudio/best',
+                            'outtmpl': out_template,
+                            'proxy': f'socks5://127.0.0.1:{RELAY_PORT}',
+                            'postprocessors': [{
+                                'key': 'FFmpegExtractAudio',
+                                'preferredcodec': 'mp3',
+                                'preferredquality': '192',
+                            }],
+                            'quiet': True,
+                            'no_warnings': True,
+                        }
+                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                            ydl.download([page_url])
+                        if os.path.exists(out_path) and os.path.getsize(out_path) > 10000:
+                            download_success = True
+                            resp = {"success": True, "filename": filename}
+                    except Exception:
+                        pass
+
+                # 3. Direct yt-dlp fallback
+                if not download_success and page_url:
+                    try:
+                        import yt_dlp
+                        out_template = os.path.join(downloads_dir, f"TikTok_Audio_{timestamp}.%(ext)s")
+                        ydl_opts = {
+                            'format': 'bestaudio/best',
+                            'outtmpl': out_template,
+                            'postprocessors': [{
+                                'key': 'FFmpegExtractAudio',
+                                'preferredcodec': 'mp3',
+                                'preferredquality': '192',
+                            }],
+                            'quiet': True,
+                            'no_warnings': True,
+                        }
+                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                            ydl.download([page_url])
+                        if os.path.exists(out_path) and os.path.getsize(out_path) > 10000:
+                            download_success = True
+                            resp = {"success": True, "filename": filename}
+                    except Exception:
+                        pass
+
+                if not download_success:
+                    resp = {"success": False, "error": "Не удалось скачать аудиодорожку."}
+
+            except Exception as e:
+                resp = {"success": False, "error": str(e)}
+
+        elif parsed.path == "/api/translate":
+            text = qs.get("text", [""])[0]
+            target_lang = qs.get("to", ["ru"])[0]
+            translated = ""
+            if text:
+                try:
+                    import urllib.request, urllib.parse, json
+                    url = 'https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl=auto&tl=' + target_lang + '&q=' + urllib.parse.quote(text)
+                    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+                    with urllib.request.urlopen(req, timeout=6) as r_trans:
+                        data = json.loads(r_trans.read().decode('utf-8'))
+                        if isinstance(data, list) and len(data) > 0:
+                            if isinstance(data[0], list):
+                                translated = data[0][0]
+                            else:
+                                translated = data[0]
+                except Exception:
+                    pass
+                if not translated:
+                    try:
+                        import urllib.request, urllib.parse, json
+                        url = f'https://api.mymemory.translated.net/get?q={urllib.parse.quote(text)}&langpair=auto|{target_lang}'
+                        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                        with urllib.request.urlopen(req, timeout=6) as r_trans:
+                            data = json.loads(r_trans.read().decode('utf-8'))
+                            translated = data.get('responseData', {}).get('translatedText', '')
+                    except Exception:
+                        pass
+            resp = {"success": bool(translated), "translated": translated or text}
+
         self.wfile.write(json.dumps(resp).encode('utf-8'))
 
 def start_api_server():
