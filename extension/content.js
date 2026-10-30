@@ -1,8 +1,8 @@
 // =========================================================================
-// TikTok Fix Core Injected Engine v2.3
+// TikTok Fix Core Injected Engine v2.4
 // Pure Native TikTok Style (Zero Emojis, Native Fonts & Themes)
-// Includes: Repost Tab Unhide, Video Publication Date, Bottom-Right Settings,
-//           One-Click Direct Video Downloader
+// Features: Feed 2026, Dates, Reposts, Downloader (MP4 + MP3),
+//           Hotkeys (Rewind, Speed, PiP), Mouse Wheel Volume, Copy & Translate
 // =========================================================================
 (function() {
     window.TIKTOK_FIX_ACTIVE = true;
@@ -20,17 +20,17 @@
         if (!data) return;
         let items = data.itemList || (data.itemInfo && [data.itemInfo.itemStruct]) || [];
         items.forEach(it => {
-            if (it && it.id && it.video) {
-                let vid = it.video;
+            if (it && it.id) {
+                let vid = it.video || {};
                 let url = (typeof vid.playAddr === 'string' ? vid.playAddr : (vid.playAddr?.urlList?.[0])) ||
                           (typeof vid.downloadAddr === 'string' ? vid.downloadAddr : (vid.downloadAddr?.urlList?.[0])) ||
-                          (vid.bitrate?.[vid.bitrate.length - 1]?.playAddr?.urlList?.[0]);
-                let audioUrl = it.music?.playUrl || (it.music?.playUrl?.urlList?.[0]) || '';
-                if (url || audioUrl) {
+                          (vid.bitrate?.[vid.bitrate.length - 1]?.playAddr?.urlList?.[0]) || '';
+                let musicUrl = it.music?.playUrl || (it.music?.playUrl?.urlList?.[0]) || '';
+                if (url || musicUrl) {
                     window.__TIKTOK_FIX_VIDEOS.set(String(it.id), {
                         id: String(it.id),
                         url: url,
-                        audioUrl: audioUrl,
+                        audioUrl: musicUrl,
                         author: it.author?.uniqueId || '',
                         desc: it.desc || ''
                     });
@@ -101,14 +101,6 @@
                         fdepth++;
                     }
                 }
-                if (k.startsWith('__reactProps')) {
-                    let p = curr[k];
-                    if (p) {
-                        let item = p.itemInfo || p.item || p.videoData || p.aweme || p.videoInfo;
-                        if (item && (item.id || item.createTime || item.video)) return item;
-                        if (p.id && String(p.id).length >= 18) return p;
-                    }
-                }
             }
             curr = curr.parentElement;
             depth++;
@@ -116,17 +108,44 @@
         return null;
     }
 
+    // -------------------------------------------------------------
+    // Helper: Extract items from SSR rehydration scripts
+    // -------------------------------------------------------------
     let rehydrationCache = null;
     function getRehydrationItems() {
-        if (rehydrationCache) return rehydrationCache;
+        if (rehydrationCache && rehydrationCache.length > 0) return rehydrationCache;
         try {
-            let el = document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__');
-            if (el && el.textContent) {
-                let data = JSON.parse(el.textContent);
-                let defaultScope = data['__DEFAULT_SCOPE__'] || {};
+            let script = document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__');
+            if (script && script.textContent) {
+                let data = JSON.parse(script.textContent);
                 let items = [];
-                for (let k in defaultScope) {
-                    let scope = defaultScope[k];
+                let defaultScope = data['__DEFAULT_SCOPE__'];
+                if (defaultScope) {
+                    for (let key in defaultScope) {
+                        let obj = defaultScope[key];
+                        if (obj && obj.itemList && Array.isArray(obj.itemList)) {
+                            items.push(...obj.itemList);
+                        }
+                        if (obj && obj.itemInfo && obj.itemInfo.itemStruct) {
+                            items.push(obj.itemInfo.itemStruct);
+                        }
+                    }
+                }
+                let webapp = data['webapp.video-detail'];
+                if (webapp && webapp.itemInfo && webapp.itemInfo.itemStruct) {
+                    items.push(webapp.itemInfo.itemStruct);
+                }
+                let feed = data['webapp.user-detail'];
+                if (feed && feed.itemList) {
+                    items.push(...feed.itemList);
+                }
+                let sigil = document.getElementById('SIGI_STATE');
+                if (sigil && sigil.textContent) {
+                    let sdata = JSON.parse(sigil.textContent);
+                    let scope = sdata.ItemModule;
+                    if (scope) {
+                        for (let k in scope) items.push(scope[k]);
+                    }
                     if (scope && scope.itemList) {
                         items.push(...scope.itemList);
                     }
@@ -139,100 +158,111 @@
     }
 
     // -------------------------------------------------------------
-    // 1. Publication Date (Clean Native Style, No Emojis)
+    // Helper: Get Active / Playing Video Element
+    // -------------------------------------------------------------
+    function getActiveVideo() {
+        let videos = Array.from(document.querySelectorAll('video'));
+        if (!videos.length) return null;
+        let active = videos.find(v => !v.paused && v.currentTime > 0);
+        if (active) return active;
+        let midY = window.innerHeight / 2;
+        let midX = window.innerWidth / 2;
+        let best = null, minDist = 999999;
+        for (let v of videos) {
+            let r = v.getBoundingClientRect();
+            if (r.width > 0 && r.height > 0) {
+                let dist = Math.abs((r.top + r.height / 2) - midY) + Math.abs((r.left + r.width / 2) - midX);
+                if (dist < minDist) {
+                    minDist = dist;
+                    best = v;
+                }
+            }
+        }
+        return best || videos[0];
+    }
+
+    // -------------------------------------------------------------
+    // Floating Notification (Isolated in body, Zero DOM issues)
+    // -------------------------------------------------------------
+    function showVideoToast(text) {
+        let existing = document.getElementById('tf-global-toast');
+        if (existing) existing.remove();
+
+        let toast = document.createElement('div');
+        toast.id = 'tf-global-toast';
+        toast.textContent = text;
+        toast.style.cssText = `
+            position: fixed !important;
+            top: 70px !important;
+            left: 50% !important;
+            transform: translateX(-50%) !important;
+            background: rgba(18, 18, 26, 0.92) !important;
+            backdrop-filter: blur(12px) !important;
+            border: 1px solid rgba(255, 255, 255, 0.22) !important;
+            color: #ffffff !important;
+            padding: 8px 24px !important;
+            border-radius: 20px !important;
+            font-size: 14px !important;
+            font-weight: 600 !important;
+            z-index: 2147483647 !important;
+            pointer-events: none !important;
+            font-family: TikTokSans, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+            box-shadow: 0 8px 30px rgba(0,0,0,0.6) !important;
+            transition: opacity 0.25s ease !important;
+            opacity: 1 !important;
+            user-select: none !important;
+        `;
+        document.body.appendChild(toast);
+        setTimeout(() => {
+            toast.style.opacity = '0';
+            setTimeout(() => toast.remove(), 250);
+        }, 800);
+    }
+
+    // -------------------------------------------------------------
+    // 1. Publication Date (Guaranteed NO duplicates, NEVER touches avatar)
     // -------------------------------------------------------------
     function updateVideoDates() {
-        // Remove any dates that were placed under or near an avatar
-        document.querySelectorAll('.tiktok-fix-date').forEach(el => {
-            if (el.closest('[data-e2e="video-author-avatar"]') || 
-                (el.previousElementSibling && (el.previousElementSibling.getAttribute('data-e2e') === 'video-author-avatar' || el.previousElementSibling.querySelector('img')))) {
-                el.remove();
-                return;
-            }
-            if (el.textContent.includes('📅')) {
-                el.textContent = el.textContent.replace('📅', '·').trim();
-            }
-        });
+        let cards = Array.from(document.querySelectorAll('article[data-e2e="recommend-list-item-container"], div[class*="ItemContainer"], [data-e2e="recommend-list-item"]'));
+        if (!cards.length) {
+            cards = [document.body];
+        }
 
-        // Target ONLY elements in Creator Info containers (NOT the right-side avatar)
-        let authorEls = Array.from(document.querySelectorAll(
-            'div[class*="DivCreatorInfoContainer"] a, div[data-e2e="video-author-info"] a, div[data-e2e="video-author-info"] h3, [data-e2e="video-author-uniqueid"], div[class*="DivCreatorInfoContainer"] p[class*="StyledTUXText"]'
-        ));
+        cards.forEach(card => {
+            // NEVER add more than one date badge to the same video card!
+            if (card.querySelector('.tiktok-fix-date')) return;
 
-        authorEls.forEach(author => {
-            // NEVER attach to avatar!
+            let author = card.querySelector('[data-e2e="video-author-uniqueid"]') ||
+                         card.querySelector('div[data-e2e="video-author-info"] a') ||
+                         card.querySelector('div[class*="DivCreatorInfoContainer"] a');
+            if (!author) return;
+
+            // Never attach to avatar
             if (author.getAttribute('data-e2e') === 'video-author-avatar' ||
                 author.closest('[data-e2e="video-author-avatar"]') ||
                 author.querySelector('img') ||
-                author.closest('div[class*="Avatar"]') ||
-                author.closest('span[class*="Avatar"]') ||
-                author.classList.contains('AvatarLink') ||
-                author.className.includes('Avatar')) {
+                author.closest('div[class*="Avatar"]')) {
                 return;
             }
-            if (author.querySelector('.tiktok-fix-date')) return;
-            if (author.parentElement && author.parentElement.querySelector('.tiktok-fix-date')) return;
-            if (author.nextElementSibling && author.nextElementSibling.classList.contains('tiktok-fix-date')) return;
 
-            let rect = author.getBoundingClientRect();
-            if (rect.width === 0 && rect.height === 0) return;
-
-            let authorText = author.innerText.trim().replace(/^@/, '');
             let dateStr = null;
-
-            let itemData = getVideoDataFromElement(author);
+            let itemData = getVideoDataFromElement(author) || getVideoDataFromElement(card);
             if (itemData) {
                 if (itemData.createTime) dateStr = formatTimestamp(itemData.createTime);
                 else if (itemData.id) dateStr = getDateFromVideoId(itemData.id);
             }
 
-            if (!dateStr && authorText) {
-                let items = getRehydrationItems();
-                let matched = items.find(it => {
-                    let uId = (it.author && it.author.uniqueId) || '';
-                    return uId.toLowerCase() === authorText.toLowerCase();
-                });
-                if (matched) {
-                    if (matched.createTime) dateStr = formatTimestamp(matched.createTime);
-                    else if (matched.id) dateStr = getDateFromVideoId(matched.id);
-                }
-            }
-
             if (!dateStr) {
-                let container = author.closest('article[data-e2e="recommend-list-item-container"]') || author.closest('[data-e2e="recommend-list-item"]') || author.closest('div[class*="ItemContainer"]') || author.parentElement.parentElement;
-                if (container) {
-                    let vItemData = getVideoDataFromElement(container);
-                    if (vItemData && vItemData.id) {
-                        dateStr = getDateFromVideoId(vItemData.id);
-                    }
-                    if (!dateStr) {
-                        let link = container.querySelector('a[href*="/video/"]');
-                        if (link) {
-                            let m = link.href.match(/\/video\/(\d+)/);
-                            if (m) dateStr = getDateFromVideoId(m[1]);
-                        }
-                    }
-                    if (!dateStr) {
-                        let html = container.innerHTML;
-                        let m = html.match(/\/video\/(\d{18,19})/);
-                        if (m) dateStr = getDateFromVideoId(m[1]);
-                    }
+                let link = card.querySelector('a[href*="/video/"]');
+                if (link) {
+                    let m = link.href.match(/\/video\/(\d+)/);
+                    if (m) dateStr = getDateFromVideoId(m[1]);
                 }
             }
 
             if (!dateStr && window.location.href.includes('/video/')) {
                 let m = window.location.href.match(/\/video\/(\d+)/);
                 if (m) dateStr = getDateFromVideoId(m[1]);
-            }
-
-            if (!dateStr) {
-                let v = document.querySelector('video');
-                if (v) {
-                    let vData = getVideoDataFromElement(v);
-                    if (vData && (vData.createTime || vData.id)) {
-                        dateStr = vData.createTime ? formatTimestamp(vData.createTime) : getDateFromVideoId(vData.id);
-                    }
-                }
             }
 
             if (dateStr) {
@@ -278,24 +308,18 @@
                 tab.id = 'tf-custom-repost-tab';
                 tab.role = 'tab';
                 tab.tabIndex = 0;
-                tab.className = sampleTab ? sampleTab.className : 'css-1wqesiq-7937d88b--PRepost e10obkj23';
-                tab.style.cssText = 'display: inline-flex !important; cursor: pointer; user-select: none;';
-                tab.innerHTML = '<span>Репосты</span>';
-                
+                tab.className = sampleTab ? sampleTab.className : 'css-11y9b6f-7937d88b--PTabItem e1fq0y1c3';
+                tab.style.cssText = 'display: inline-flex !important; cursor: pointer; align-items: center; justify-content: center;';
+                tab.innerHTML = `<span>Репосты</span>`;
+
                 tab.onclick = () => {
-                    tabBar.querySelectorAll('[role="tab"]').forEach(t => {
-                        t.setAttribute('aria-selected', 'false');
-                        t.classList.remove('active');
-                    });
+                    tabBar.querySelectorAll('[role="tab"]').forEach(t => t.setAttribute('aria-selected', 'false'));
                     tab.setAttribute('aria-selected', 'true');
-                    
                     try {
-                        let el = document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__');
-                        let d = el ? JSON.parse(el.textContent) : {};
-                        let u = d['__DEFAULT_SCOPE__'] ? d['__DEFAULT_SCOPE__']['webapp.user-detail'] : null;
-                        if (u && u.userInfo && u.userInfo.user) {
-                            let secUid = u.userInfo.user.secUid;
-                            fetch(`/api/user/repost/item_list/?secUid=${secUid}&count=30&cursor=0`)
+                        let match = window.location.pathname.match(/@([^/?#]+)/);
+                        if (match) {
+                            let secUid = window.__UNIVERSAL_DATA_FOR_REHYDRATION__?.['__DEFAULT_SCOPE__']?.['webapp.user-detail']?.userInfo?.user?.secUid || '';
+                            fetch(`https://www.tiktok.com/api/user/repost/item_list/?secUid=${encodeURIComponent(secUid)}&count=30&cursor=0`)
                                 .then(r => r.json())
                                 .then(data => {
                                     if (data && data.itemList && data.itemList.length > 0) {
@@ -335,7 +359,7 @@
     }
 
     // -------------------------------------------------------------
-    // 3. Clean up Profile Backgrounds (Per User Request: Completely Removed)
+    // 3. Clean up Profile Backgrounds (Native Profile Header)
     // -------------------------------------------------------------
     function cleanupProfileBanners() {
         document.querySelectorAll('#tiktok-fix-banner, #tiktok-fix-banner-bg, #tf-change-banner-btn').forEach(el => el.remove());
@@ -379,396 +403,55 @@
     }
 
     // -------------------------------------------------------------
-    
+    // 5. Volume Control via Mouse Wheel directly on video
     // -------------------------------------------------------------
-    // Helper: Active Video Finder
-    // -------------------------------------------------------------
-    function getActiveVideo() {
-        let videos = Array.from(document.querySelectorAll('video'));
-        if (!videos.length) return null;
-        let active = videos.find(v => !v.paused && v.currentTime > 0);
-        if (active) return active;
-        let midY = window.innerHeight / 2;
-        let midX = window.innerWidth / 2;
-        let best = null, minDist = 999999;
-        for (let v of videos) {
-            let r = v.getBoundingClientRect();
-            if (r.width > 0 && r.height > 0) {
-                let dist = Math.abs((r.top + r.height / 2) - midY) + Math.abs((r.left + r.width / 2) - midX);
-                if (dist < minDist) {
-                    minDist = dist;
-                    best = v;
-                }
-            }
-        }
-        return best || videos[0];
-    }
-
-    // -------------------------------------------------------------
-    // On-Screen Toast Notification on Video
-    // -------------------------------------------------------------
-    function showVideoToast(video, text) {
-        if (!video) return;
-        let container = video.closest('div[class*="DivVideoWrapper"]') ||
-                        video.closest('div[class*="DivPlayerContainer"]') ||
-                        video.closest('div[class*="ItemContainer"]') ||
-                        video.parentElement;
-        if (!container) return;
-        let existing = container.querySelector('.tf-video-toast');
-        if (existing) existing.remove();
-
-        let toast = document.createElement('div');
-        toast.className = 'tf-video-toast';
-        toast.textContent = text;
-        toast.style.cssText = `
-            position: absolute !important;
-            top: 50% !important;
-            left: 50% !important;
-            transform: translate(-50%, -50%) !important;
-            background: rgba(18, 18, 26, 0.88) !important;
-            backdrop-filter: blur(10px) !important;
-            border: 1px solid rgba(255, 255, 255, 0.2) !important;
-            color: #ffffff !important;
-            padding: 8px 18px !important;
-            border-radius: 20px !important;
-            font-size: 14px !important;
-            font-weight: 600 !important;
-            z-index: 2147483640 !important;
-            pointer-events: none !important;
-            font-family: TikTokSans, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.6) !important;
-            transition: opacity 0.25s ease !important;
-            opacity: 1 !important;
-            user-select: none !important;
-        `;
-        container.appendChild(toast);
-        setTimeout(() => {
-            toast.style.opacity = '0';
-            setTimeout(() => toast.remove(), 250);
-        }, 750);
-    }
-
-    // -------------------------------------------------------------
-    // Feature 5: Volume Memory & Mouse Scroll Volume
-    // -------------------------------------------------------------
-    function applySavedVolume(v) {
-        if (!v) return;
-        let savedVol = localStorage.getItem('tf_volume');
-        if (savedVol !== null) {
-            let vol = parseFloat(savedVol);
-            if (!isNaN(vol)) {
-                v.volume = Math.max(0, Math.min(1, vol));
-                if (vol > 0) v.muted = false;
-            }
-        }
-    }
-
-    function bindWheelAndEvents(container) {
-        if (!container || container.dataset.tfWheelBound) return;
-        container.dataset.tfWheelBound = 'true';
-
-        container.addEventListener('wheel', function(e) {
-            let v = container.querySelector('video') || (container.tagName === 'VIDEO' ? container : document.querySelector('video'));
-            if (!v) return;
-            e.preventDefault();
-            e.stopPropagation();
-            let step = 0.05;
-            let current = v.volume;
-            let newVol = current + (e.deltaY < 0 ? step : -step);
-            newVol = Math.max(0, Math.min(1, Math.round(newVol * 100) / 100));
-            v.volume = newVol;
-            v.muted = (newVol === 0);
-            localStorage.setItem('tf_volume', newVol);
-            showVideoToast(v, `Громкость: ${Math.round(newVol * 100)}%`);
-        }, { passive: false });
-    }
-
-    // -------------------------------------------------------------
-    // Feature 7: Picture-in-Picture (PiP)
-    // -------------------------------------------------------------
-    function togglePiP() {
-        let v = getActiveVideo();
-        if (!v) return;
-        if (document.pictureInPictureElement) {
-            document.exitPictureInPicture().catch(() => {});
-            showVideoToast(v, 'PiP выключен');
-        } else if (document.pictureInPictureEnabled) {
-            v.requestPictureInPicture().then(() => {
-                showVideoToast(v, 'Картинка в картинке');
-            }).catch(() => {});
-        }
-    }
-
-    function updatePiPButtons() {
+    function bindVideoVolume() {
         let videos = document.querySelectorAll('video');
         videos.forEach(v => {
-            applySavedVolume(v);
-            let container = v.closest('div[class*="DivVideoWrapper"]') ||
-                            v.closest('div[class*="DivPlayerContainer"]') ||
-                            v.closest('div[class*="ItemContainer"]') ||
-                            v.parentElement;
-            if (container) {
-                bindWheelAndEvents(container);
-                if (!container.querySelector('.tf-pip-btn')) {
-                    let pipBtn = document.createElement('button');
-                    pipBtn.className = 'tf-pip-btn';
-                    pipBtn.title = 'Картинка в картинке (P)';
-                    pipBtn.innerHTML = `
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
-                            <rect x="12" y="9" width="8" height="6" rx="1" ry="1" fill="currentColor"></rect>
-                        </svg>
-                    `;
-                    pipBtn.style.cssText = `
-                        position: absolute !important;
-                        top: 14px !important;
-                        right: 14px !important;
-                        background: rgba(18, 18, 26, 0.7) !important;
-                        backdrop-filter: blur(8px) !important;
-                        border: 1px solid rgba(255, 255, 255, 0.2) !important;
-                        border-radius: 50% !important;
-                        width: 32px !important;
-                        height: 32px !important;
-                        display: flex !important;
-                        align-items: center !important;
-                        justify-content: center !important;
-                        color: #ffffff !important;
-                        cursor: pointer !important;
-                        z-index: 2147483640 !important;
-                        opacity: 0.75 !important;
-                        transition: opacity 0.2s ease, transform 0.2s ease !important;
-                        padding: 0 !important;
-                        outline: none !important;
-                    `;
-                    pipBtn.onmouseover = () => { pipBtn.style.opacity = '1'; pipBtn.style.transform = 'scale(1.1)'; };
-                    pipBtn.onmouseout = () => { pipBtn.style.opacity = '0.75'; pipBtn.style.transform = 'scale(1)'; };
-                    pipBtn.onclick = (e) => {
-                        e.stopPropagation();
-                        togglePiP();
-                    };
-                    container.style.position = container.style.position || 'relative';
-                    container.appendChild(pipBtn);
-                }
-            }
-        });
-    }
+            if (v.dataset.tfVolBound) return;
+            v.dataset.tfVolBound = 'true';
 
-    // -------------------------------------------------------------
-    // Feature 6: Copy Caption & Translate Description
-    // -------------------------------------------------------------
-    function updateDescriptionActions() {
-        let descEls = document.querySelectorAll('h1[data-e2e="browse-video-desc"], div[data-e2e="browse-video-desc"], [data-e2e="user-post-item-desc"], div[class*="DivTextInfoContainer"] h1');
-        descEls.forEach(el => {
-            if (el.dataset.tfDescActionsBound) return;
-            el.dataset.tfDescActionsBound = 'true';
-
-            let rawText = el.innerText || '';
-            if (!rawText.trim()) return;
-
-            let actionsRow = document.createElement('div');
-            actionsRow.className = 'tf-desc-actions';
-            actionsRow.style.cssText = `
-                display: flex !important;
-                align-items: center !important;
-                gap: 8px !important;
-                margin-top: 6px !important;
-                margin-bottom: 6px !important;
-                user-select: none !important;
-            `;
-
-            // Copy button
-            let copyBtn = document.createElement('button');
-            copyBtn.textContent = 'Копировать текст';
-            copyBtn.style.cssText = `
-                background: rgba(255, 255, 255, 0.08) !important;
-                border: 1px solid rgba(255, 255, 255, 0.16) !important;
-                border-radius: 6px !important;
-                padding: 3px 8px !important;
-                font-size: 11px !important;
-                font-weight: 600 !important;
-                color: rgba(255, 255, 255, 0.85) !important;
-                cursor: pointer !important;
-                transition: background 0.15s ease !important;
-            `;
-            copyBtn.onmouseover = () => { copyBtn.style.background = 'rgba(255, 255, 255, 0.15)'; };
-            copyBtn.onmouseout = () => { copyBtn.style.background = 'rgba(255, 255, 255, 0.08)'; };
-            copyBtn.onclick = (e) => {
+            v.addEventListener('wheel', function(e) {
+                e.preventDefault();
                 e.stopPropagation();
-                let clean = el.innerText.replace(/Копировать текст|Перевести|Скрыть перевод/g, '').trim();
-                navigator.clipboard.writeText(clean).then(() => {
-                    let prev = copyBtn.textContent;
-                    copyBtn.textContent = 'Скопировано!';
-                    setTimeout(() => { copyBtn.textContent = prev; }, 1500);
-                });
-            };
-            actionsRow.appendChild(copyBtn);
-
-            // Translate button (if contains Latin or other non-Cyrillic words)
-            let hasForeign = /[a-zA-Z]{3,}/.test(rawText);
-            if (hasForeign) {
-                let transBtn = document.createElement('button');
-                transBtn.textContent = 'Перевести';
-                transBtn.style.cssText = copyBtn.style.cssText;
-                transBtn.onmouseover = () => { transBtn.style.background = 'rgba(255, 255, 255, 0.15)'; };
-                transBtn.onmouseout = () => { transBtn.style.background = 'rgba(255, 255, 255, 0.08)'; };
-
-                let transBox = null;
-                transBtn.onclick = (e) => {
-                    e.stopPropagation();
-                    if (transBox) {
-                        if (transBox.style.display === 'none') {
-                            transBox.style.display = 'block';
-                            transBtn.textContent = 'Скрыть перевод';
-                        } else {
-                            transBox.style.display = 'none';
-                            transBtn.textContent = 'Перевести';
-                        }
-                        return;
-                    }
-
-                    transBtn.textContent = 'Перевод...';
-                    let clean = el.innerText.replace(/Копировать текст|Перевести|Скрыть перевод/g, '').trim();
-                    fetch(`http://127.0.0.1:28889/api/translate?text=${encodeURIComponent(clean)}`)
-                        .then(r => r.json())
-                        .then(d => {
-                            if (d.success && d.translated) {
-                                transBox = document.createElement('div');
-                                transBox.className = 'tf-desc-translated';
-                                transBox.style.cssText = `
-                                    margin-top: 6px !important;
-                                    padding-left: 10px !important;
-                                    border-left: 2px solid #fe2c55 !important;
-                                    color: rgba(255, 255, 255, 0.75) !important;
-                                    font-size: 13px !important;
-                                    line-height: 1.4 !important;
-                                    font-style: italic !important;
-                                `;
-                                transBox.textContent = d.translated;
-                                actionsRow.parentNode.insertBefore(transBox, actionsRow.nextSibling);
-                                transBtn.textContent = 'Скрыть перевод';
-                            } else {
-                                transBtn.textContent = 'Перевести';
-                            }
-                        })
-                        .catch(() => { transBtn.textContent = 'Перевести'; });
-                };
-                actionsRow.appendChild(transBtn);
-            }
-
-            el.parentNode.insertBefore(actionsRow, el.nextSibling);
+                let step = 0.05;
+                let cur = v.volume;
+                let newVol = cur + (e.deltaY < 0 ? step : -step);
+                newVol = Math.max(0, Math.min(1, Math.round(newVol * 100) / 100));
+                v.volume = newVol;
+                if (newVol > 0 && v.muted) v.muted = false;
+                if (newVol === 0) v.muted = true;
+                localStorage.setItem('tf_volume', newVol);
+                showVideoToast(`Громкость: ${Math.round(newVol * 100)}%`);
+            }, { passive: false });
         });
     }
 
     // -------------------------------------------------------------
-    // Feature 14: Fast Translate for Comments
+    // 6. Direct Video & Audio Downloader
     // -------------------------------------------------------------
-    function updateCommentsTranslation() {
-        let commentContainers = document.querySelectorAll('div[data-e2e="comment-level-1"], div[data-e2e="comment-level-2"], div[class*="DivCommentItemContainer"]');
-        commentContainers.forEach(container => {
-            if (container.dataset.tfCommentBound) return;
-            container.dataset.tfCommentBound = 'true';
-
-            let pText = container.querySelector('p[data-e2e="comment-text"], span[class*="SpanCommentText"]');
-            if (!pText) return;
-
-            let text = pText.innerText || '';
-            if (!/[a-zA-Z]{3,}/.test(text)) return;
-
-            let btn = document.createElement('span');
-            btn.className = 'tf-comment-translate-btn';
-            btn.textContent = ' · Перевести';
-            btn.style.cssText = `
-                display: inline-block !important;
-                margin-left: 6px !important;
-                font-size: 12px !important;
-                color: rgba(255, 255, 255, 0.5) !important;
-                cursor: pointer !important;
-                font-weight: 600 !important;
-                user-select: none !important;
-                transition: color 0.15s ease !important;
-            `;
-            btn.onmouseover = () => { btn.style.color = '#fe2c55'; };
-            btn.onmouseout = () => { btn.style.color = 'rgba(255, 255, 255, 0.5)'; };
-
-            let translationDiv = null;
-            btn.onclick = (e) => {
-                e.stopPropagation();
-                if (translationDiv) {
-                    if (translationDiv.style.display === 'none') {
-                        translationDiv.style.display = 'block';
-                        btn.textContent = ' · Скрыть перевод';
-                    } else {
-                        translationDiv.style.display = 'none';
-                        btn.textContent = ' · Перевести';
-                    }
-                    return;
-                }
-
-                btn.textContent = ' · Перевод...';
-                let commentContent = pText.innerText.trim();
-                fetch(`http://127.0.0.1:28889/api/translate?text=${encodeURIComponent(commentContent)}`)
-                    .then(r => r.json())
-                    .then(d => {
-                        if (d.success && d.translated) {
-                            translationDiv = document.createElement('div');
-                            translationDiv.className = 'tf-comment-translation-box';
-                            translationDiv.style.cssText = `
-                                margin-top: 4px !important;
-                                padding-left: 8px !important;
-                                border-left: 2px solid #fe2c55 !important;
-                                color: rgba(255, 255, 255, 0.75) !important;
-                                font-size: 13px !important;
-                                line-height: 1.35 !important;
-                            `;
-                            translationDiv.textContent = d.translated;
-                            pText.parentNode.insertBefore(translationDiv, pText.nextSibling);
-                            btn.textContent = ' · Скрыть перевод';
-                        } else {
-                            btn.textContent = ' · Перевести';
-                        }
-                    })
-                    .catch(() => { btn.textContent = ' · Перевести'; });
-            };
-
-            pText.appendChild(btn);
-        });
-    }
-
-    // -------------------------------------------------------------
-    // Feature 4: Download Audio / Sound (MP3)
-    // -------------------------------------------------------------
-    function downloadCurrentAudio(btn) {
-        if (!btn) return;
-        let origText = btn.textContent;
-        btn.textContent = 'Поиск аудио...';
-
+    function getActiveMediaInfo() {
         let directUrl = null;
         let audioUrl = null;
         let pageUrl = window.location.href;
         let videoId = null;
+        let desc = '';
 
-        let videos = Array.from(document.querySelectorAll('video'));
-        let activeVideo = videos.find(v => !v.paused && v.currentTime > 0) || videos[0];
-
-        if (activeVideo) {
-            let vData = getVideoDataFromElement(activeVideo);
-            if (!vData && activeVideo.parentElement) {
-                let container = activeVideo.closest('article[data-e2e="recommend-list-item-container"]') || 
-                                activeVideo.closest('[data-e2e="recommend-list-item"]') || 
-                                activeVideo.closest('div[class*="ItemContainer"]') ||
-                                activeVideo.parentElement.parentElement;
-                if (container) vData = getVideoDataFromElement(container);
+        let v = getActiveVideo();
+        if (v) {
+            if (v.currentSrc && v.currentSrc.startsWith('http') && !v.currentSrc.startsWith('blob:')) {
+                directUrl = v.currentSrc;
             }
+            let vData = getVideoDataFromElement(v);
             if (vData) {
                 if (vData.id) videoId = String(vData.id);
-                if (vData.music) {
-                    audioUrl = vData.music.playUrl || (vData.music.playUrl?.urlList?.[0]) || '';
-                }
+                if (vData.desc) desc = vData.desc;
+                if (vData.music) audioUrl = vData.music.playUrl || (vData.music.playUrl?.urlList?.[0]) || '';
                 if (vData.video) {
                     let vid = vData.video;
                     directUrl = (typeof vid.playAddr === 'string' ? vid.playAddr : (vid.playAddr?.urlList?.[0])) ||
                                 (typeof vid.downloadAddr === 'string' ? vid.downloadAddr : (vid.downloadAddr?.urlList?.[0])) ||
-                                (vid.bitrate?.[vid.bitrate.length - 1]?.playAddr?.urlList?.[0]);
+                                (vid.bitrate?.[vid.bitrate.length - 1]?.playAddr?.urlList?.[0]) || directUrl;
                 }
                 if (vData.author && vData.author.uniqueId && videoId) {
                     pageUrl = `https://www.tiktok.com/@${vData.author.uniqueId}/video/${videoId}`;
@@ -786,112 +469,34 @@
             let info = window.__TIKTOK_FIX_VIDEOS.get(videoId);
             if (info.url) directUrl = info.url;
             if (info.audioUrl) audioUrl = info.audioUrl;
+            if (info.desc) desc = info.desc;
             if (info.author && !pageUrl.includes('/video/')) {
                 pageUrl = `https://www.tiktok.com/@${info.author}/video/${videoId}`;
             }
         }
 
-        btn.textContent = 'Скачивание MP3...';
+        if (!desc) {
+            let dEl = document.querySelector('h1[data-e2e="browse-video-desc"], div[data-e2e="browse-video-desc"], [data-e2e="user-post-item-desc"]');
+            if (dEl) desc = dEl.innerText.trim();
+        }
 
-        fetch(`http://127.0.0.1:28889/api/download_audio?page=${encodeURIComponent(pageUrl)}&src=${encodeURIComponent(directUrl || '')}&audio_src=${encodeURIComponent(audioUrl || '')}`)
-            .then(r => r.json())
-            .then(data => {
-                btn.textContent = origText;
-                if (data.success) {
-                    alert(`Аудиодорожка успешно сохранена в Загрузки!\\nФайл: ${data.filename}`);
-                } else {
-                    alert(`Ошибка скачивания: ${data.error || 'Не удалось получить аудио'}`);
-                }
-            })
-            .catch(err => {
-                btn.textContent = origText;
-                alert(`Ошибка соединения: ${err}`);
-            });
+        return { videoId, pageUrl, directUrl, audioUrl, desc };
     }
 
-    // 5. Video Downloader Engine (Direct CDN + Fallback)
-    // -------------------------------------------------------------
     function downloadCurrentVideo(btn) {
         if (!btn) return;
         let origText = btn.textContent;
         btn.textContent = 'Поиск видео...';
 
-        let directUrl = null;
-        let pageUrl = window.location.href;
-        let videoId = null;
-
-        // 1. Find currently active/playing video
-        let videos = Array.from(document.querySelectorAll('video'));
-        let activeVideo = videos.find(v => !v.paused && v.currentTime > 0) || videos[0];
-
-        if (activeVideo) {
-            // Check direct URL on video element
-            if (activeVideo.currentSrc && activeVideo.currentSrc.startsWith('http') && !activeVideo.currentSrc.startsWith('blob:')) {
-                directUrl = activeVideo.currentSrc;
-            }
-
-            // Extract from React Fiber
-            let vData = getVideoDataFromElement(activeVideo);
-            if (!vData && activeVideo.parentElement) {
-                let container = activeVideo.closest('article[data-e2e="recommend-list-item-container"]') || 
-                                activeVideo.closest('[data-e2e="recommend-list-item"]') || 
-                                activeVideo.closest('div[class*="ItemContainer"]') ||
-                                activeVideo.parentElement.parentElement;
-                if (container) vData = getVideoDataFromElement(container);
-            }
-
-            if (vData) {
-                if (vData.id) videoId = String(vData.id);
-                if (vData.video) {
-                    let vid = vData.video;
-                    directUrl = (typeof vid.playAddr === 'string' ? vid.playAddr : (vid.playAddr?.urlList?.[0])) ||
-                                (typeof vid.downloadAddr === 'string' ? vid.downloadAddr : (vid.downloadAddr?.urlList?.[0])) ||
-                                (vid.bitrate?.[vid.bitrate.length - 1]?.playAddr?.urlList?.[0]) || directUrl;
-                }
-                if (vData.author && vData.author.uniqueId && videoId) {
-                    pageUrl = `https://www.tiktok.com/@${vData.author.uniqueId}/video/${videoId}`;
-                }
-            }
-        }
-
-        // 2. Check URL for /video/12345
-        let m = window.location.href.match(/\/video\/(\d+)/);
-        if (m) {
-            videoId = m[1];
-            pageUrl = window.location.href;
-        }
-
-        // 3. Check intercepted feed map
-        if (videoId && window.__TIKTOK_FIX_VIDEOS && window.__TIKTOK_FIX_VIDEOS.has(videoId)) {
-            let info = window.__TIKTOK_FIX_VIDEOS.get(videoId);
-            if (info.url) directUrl = info.url;
-            if (info.author && !pageUrl.includes('/video/')) {
-                pageUrl = `https://www.tiktok.com/@${info.author}/video/${videoId}`;
-            }
-        }
-
-        // 4. Check rehydration data
-        if (!directUrl) {
-            let rehydration = getRehydrationItems();
-            let matched = videoId ? rehydration.find(it => String(it.id) === String(videoId)) : rehydration[0];
-            if (matched && matched.video) {
-                let vid = matched.video;
-                directUrl = (typeof vid.playAddr === 'string' ? vid.playAddr : (vid.playAddr?.urlList?.[0])) ||
-                            (typeof vid.downloadAddr === 'string' ? vid.downloadAddr : (vid.downloadAddr?.urlList?.[0])) ||
-                            (vid.bitrate?.[vid.bitrate.length - 1]?.playAddr?.urlList?.[0]);
-                if (matched.author && matched.author.uniqueId && matched.id) {
-                    pageUrl = `https://www.tiktok.com/@${matched.author.uniqueId}/video/${matched.id}`;
-                }
-            }
-        }
-
+        let info = getActiveMediaInfo();
         btn.textContent = 'Скачивание...';
 
-        fetch(`http://127.0.0.1:28889/api/download?page=${encodeURIComponent(pageUrl)}&src=${encodeURIComponent(directUrl || '')}`)
+        fetch(`http://127.0.0.1:28889/api/download?page=${encodeURIComponent(info.pageUrl)}&src=${encodeURIComponent(info.directUrl || '')}`)
             .then(r => r.json())
             .then(data => {
                 btn.textContent = origText;
                 if (data.success) {
+                    showVideoToast(`Сохранено: ${data.filename}`);
                     alert(`Видео успешно сохранено в Загрузки!\nФайл: ${data.filename}`);
                 } else {
                     alert(`Ошибка скачивания: ${data.error || 'Не удалось получить видео'}`);
@@ -903,8 +508,85 @@
             });
     }
 
+    function downloadCurrentAudio(btn) {
+        if (!btn) return;
+        let origText = btn.textContent;
+        btn.textContent = 'Поиск аудио...';
+
+        let info = getActiveMediaInfo();
+        btn.textContent = 'Скачивание MP3...';
+
+        fetch(`http://127.0.0.1:28889/api/download_audio?page=${encodeURIComponent(info.pageUrl)}&src=${encodeURIComponent(info.directUrl || '')}&audio_src=${encodeURIComponent(info.audioUrl || '')}`)
+            .then(r => r.json())
+            .then(data => {
+                btn.textContent = origText;
+                if (data.success) {
+                    showVideoToast(`Звук сохранен: ${data.filename}`);
+                    alert(`Аудиодорожка успешно сохранена в Загрузки!\nФайл: ${data.filename}`);
+                } else {
+                    alert(`Ошибка скачивания: ${data.error || 'Не удалось получить аудио'}`);
+                }
+            })
+            .catch(err => {
+                btn.textContent = origText;
+                alert(`Ошибка соединения: ${err}`);
+            });
+    }
+
+    function copyCurrentDescription(btn) {
+        let info = getActiveMediaInfo();
+        let text = info.desc;
+        if (!text) {
+            let el = document.querySelector('h1[data-e2e="browse-video-desc"], div[data-e2e="browse-video-desc"], [data-e2e="user-post-item-desc"]');
+            if (el) text = el.innerText.trim();
+        }
+        if (!text) {
+            alert('Описание текущего видео не найдено');
+            return;
+        }
+        navigator.clipboard.writeText(text).then(() => {
+            showVideoToast('Описание скопировано!');
+            if (btn) {
+                let p = btn.textContent;
+                btn.textContent = 'Скопировано!';
+                setTimeout(() => { btn.textContent = p; }, 1200);
+            }
+        });
+    }
+
+    function translateCurrentDescription(btn) {
+        let info = getActiveMediaInfo();
+        let text = info.desc;
+        if (!text) {
+            let el = document.querySelector('h1[data-e2e="browse-video-desc"], div[data-e2e="browse-video-desc"], [data-e2e="user-post-item-desc"]');
+            if (el) text = el.innerText.trim();
+        }
+        if (!text) {
+            alert('Описание текущего видео не найдено');
+            return;
+        }
+
+        let p = btn ? btn.textContent : '';
+        if (btn) btn.textContent = 'Перевод...';
+
+        fetch(`http://127.0.0.1:28889/api/translate?text=${encodeURIComponent(text)}`)
+            .then(r => r.json())
+            .then(d => {
+                if (btn) btn.textContent = p;
+                if (d.success && d.translated) {
+                    alert(`Перевод описания:\n\n${d.translated}`);
+                } else {
+                    alert('Не удалось перевести описание');
+                }
+            })
+            .catch(e => {
+                if (btn) btn.textContent = p;
+                alert('Ошибка перевода: ' + e);
+            });
+    }
+
     // -------------------------------------------------------------
-    // 6. Mod Settings Button (Bottom-Right Floating Gear, No Text)
+    // 7. Mod Settings Button (Bottom-Right Floating Gear, No Text)
     // -------------------------------------------------------------
     function updateFabSettingsButton() {
         let oldTopBtn = document.getElementById('tiktok-fix-header-btn');
@@ -963,7 +645,7 @@
     }
 
     // -------------------------------------------------------------
-    // 7. Native Settings Section on /setting (Clean TikTok UI)
+    // 8. Native Settings Section on /setting (Clean TikTok UI)
     // -------------------------------------------------------------
     function updateSettingsPage() {
         if (!window.location.href.includes('/setting')) return;
@@ -1006,11 +688,7 @@
                     <label style="display: block; font-size: 12px; color: rgba(255, 255, 255, 0.6); margin-bottom: 6px; font-weight: 600;">Регион подключения</label>
                     <select id="tf-nat-region" style="width: 100%; background: #252533; color: #fff; border: 1px solid #3d3d50; border-radius: 8px; padding: 10px 12px; font-size: 14px; outline: none; cursor: pointer;">
                         <option value="FR">Франция (FR)</option>
-                        <option value="DE">Германия (DE)</option>
-                        <option value="NL">Нидерланды (NL)</option>
                         <option value="US">США (US)</option>
-                        <option value="JP">Япония (JP)</option>
-                        <option value="SG">Сингапур (SG)</option>
                         <option value="DIRECT">Россия (Прямой)</option>
                     </select>
                 </div>
@@ -1050,32 +728,11 @@
                         Скачать звук (MP3)
                     </button>
                 </div>
-                <span style="font-size: 12px; color: rgba(255, 255, 255, 0.45);">Дата публикации, репосты и перевод отображаются автоматически</span>
+                <span style="font-size: 12px; color: rgba(255, 255, 255, 0.45);">Дата публикации и репосты отображаются автоматически</span>
             </div>
         `;
 
         manageContainer.parentNode.insertBefore(section, manageContainer);
-
-        // Sidebar Navigation Item
-        let navScroll = document.querySelector('div[class*="DivNavScrollContainer"]');
-        if (navScroll && !document.getElementById('tf-nav-item')) {
-            let navItem = document.createElement('div');
-            navItem.id = 'tf-nav-item';
-            navItem.className = 'css-q9noqo-7937d88b--DivNavItem e1fq0y1c7';
-            navItem.style.cssText = 'cursor: pointer; margin-bottom: 8px;';
-            navItem.innerHTML = `
-                <span class="css-okyuyz-7937d88b--SpanItemContent e1fq0y1c9" style="color: #fe2c55; font-weight: 600;">
-                    TikTok Fix
-                </span>
-            `;
-            navItem.onclick = () => {
-                let target = document.getElementById('tiktok-fix-native-section');
-                if (target) target.scrollIntoView({ behavior: 'smooth' });
-            };
-            navItem.onmouseover = () => { navItem.style.background = 'rgba(255, 255, 255, 0.06)'; };
-            navItem.onmouseout = () => { navItem.style.background = 'transparent'; };
-            navScroll.insertBefore(navItem, navScroll.firstChild);
-        }
 
         let sel = document.getElementById('tf-nat-region');
         if (sel) sel.value = currentRegion;
@@ -1122,7 +779,7 @@
     }
 
     // -------------------------------------------------------------
-    // 8. Floating Settings Panel (Clean Native Style, No Emojis)
+    // 9. Floating Settings Panel (Outside React, Completely Safe)
     // -------------------------------------------------------------
     function createSettingsPanel() {
         if (document.getElementById('tiktok-fix-panel')) return;
@@ -1156,11 +813,7 @@
                 <label style="display: block; font-size: 11px; color: rgba(255,255,255,0.55); margin-bottom: 4px; font-weight: 600;">Регион подключения</label>
                 <select id="tf-region" style="width: 100%; background: #252533; color: #fff; border: 1px solid #3d3d50; border-radius: 6px; padding: 8px 10px; font-size: 13px; outline: none; cursor: pointer;">
                     <option value="FR">Франция (FR)</option>
-                    <option value="DE">Германия (DE)</option>
-                    <option value="NL">Нидерланды (NL)</option>
                     <option value="US">США (US)</option>
-                    <option value="JP">Япония (JP)</option>
-                    <option value="SG">Сингапур (SG)</option>
                     <option value="DIRECT">Россия (Прямой)</option>
                 </select>
                 <button id="tf-reconnect" style="width: 100%; background: #252533; color: #fff; border: 1px solid #3d3d50; border-radius: 6px; padding: 8px; font-size: 12px; font-weight: 600; cursor: pointer; margin-top: 6px;">Переподключиться</button>
@@ -1183,10 +836,16 @@
             </div>
 
             <div style="margin-bottom: 12px;">
-                <label style="display: block; font-size: 11px; color: rgba(255,255,255,0.55); margin-bottom: 4px; font-weight: 600;">Действия</label>
-                <button id="tf-download" style="width: 100%; background: #fe2c55; border: none; color: #fff; border-radius: 6px; padding: 8px; font-size: 12px; font-weight: 600; cursor: pointer;">Скачать видео</button>
-                <button id="tf-download-audio" style="width: 100%; background: #252533; color: #fff; border: 1px solid #3d3d50; border-radius: 6px; padding: 8px; font-size: 12px; font-weight: 600; cursor: pointer; margin-top: 6px;">Скачать звук (MP3)</button>
-                <button id="tf-clear" style="width: 100%; background: #252533; color: #fff; border: 1px solid #3d3d50; border-radius: 6px; padding: 7px; font-size: 12px; font-weight: 600; cursor: pointer; margin-top: 6px;">Очистить кэш</button>
+                <label style="display: block; font-size: 11px; color: rgba(255,255,255,0.55); margin-bottom: 4px; font-weight: 600;">Действия с текущим видео</label>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px;">
+                    <button id="tf-download" style="background: #fe2c55; border: none; color: #fff; border-radius: 6px; padding: 8px; font-size: 12px; font-weight: 600; cursor: pointer;">Видео (MP4)</button>
+                    <button id="tf-download-audio" style="background: #252533; border: 1px solid #3d3d50; color: #fff; border-radius: 6px; padding: 8px; font-size: 12px; font-weight: 600; cursor: pointer;">Звук (MP3)</button>
+                </div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 6px;">
+                    <button id="tf-copy-desc" style="background: #252533; border: 1px solid #3d3d50; color: #fff; border-radius: 6px; padding: 7px; font-size: 12px; font-weight: 600; cursor: pointer;">Копир. текст</button>
+                    <button id="tf-trans-desc" style="background: #252533; border: 1px solid #3d3d50; color: #fff; border-radius: 6px; padding: 7px; font-size: 12px; font-weight: 600; cursor: pointer;">Перевести</button>
+                </div>
+                <button id="tf-clear" style="width: 100%; background: #1f1f2b; color: #aaa; border: 1px solid #303040; border-radius: 6px; padding: 6px; font-size: 11px; cursor: pointer; margin-top: 8px;">Очистить кэш браузера</button>
             </div>
 
             <div style="font-size: 11px; color: rgba(255,255,255,0.45); margin-top: 8px; border-top: 1px solid rgba(255,255,255,0.06); padding-top: 8px; line-height: 1.4;">
@@ -1231,12 +890,15 @@
         document.getElementById('tf-download').onclick = () => {
             downloadCurrentVideo(document.getElementById('tf-download'));
         };
-        let bAudioFloat = document.getElementById('tf-download-audio');
-        if (bAudioFloat) {
-            bAudioFloat.onclick = () => {
-                downloadCurrentAudio(bAudioFloat);
-            };
-        }
+        document.getElementById('tf-download-audio').onclick = () => {
+            downloadCurrentAudio(document.getElementById('tf-download-audio'));
+        };
+        document.getElementById('tf-copy-desc').onclick = () => {
+            copyCurrentDescription(document.getElementById('tf-copy-desc'));
+        };
+        document.getElementById('tf-trans-desc').onclick = () => {
+            translateCurrentDescription(document.getElementById('tf-trans-desc'));
+        };
     }
 
     function togglePanel() {
@@ -1250,7 +912,9 @@
         }
     }
 
-    // Keyboard Hotkeys: Settings (Right Alt / 0), Speed, Rewind, PiP
+    // -------------------------------------------------------------
+    // 10. Global Keyboard Hotkeys
+    // -------------------------------------------------------------
     window.addEventListener('keydown', function(e) {
         let isRightAlt = (e.code === 'AltRight' || e.key === 'AltGraph' || (e.key === 'Alt' && e.location === 2));
         if (isRightAlt) {
@@ -1269,27 +933,26 @@
             return;
         }
 
+        let v = getActiveVideo();
+
         // ArrowLeft: Rewind 5s
         if (e.key === 'ArrowLeft' || e.code === 'ArrowLeft') {
-            let v = getActiveVideo();
             if (v) {
                 e.preventDefault();
                 v.currentTime = Math.max(0, v.currentTime - 5);
-                showVideoToast(v, '◄◄ 5 сек');
+                showVideoToast('◄◄ 5 сек');
             }
         }
         // ArrowRight: Forward 5s
         else if (e.key === 'ArrowRight' || e.code === 'ArrowRight') {
-            let v = getActiveVideo();
             if (v) {
                 e.preventDefault();
                 v.currentTime = Math.min(v.duration || 9999, v.currentTime + 5);
-                showVideoToast(v, '5 сек ►►');
+                showVideoToast('5 сек ►►');
             }
         }
         // BracketLeft '[': Slow down
         else if (e.key === '[' || e.code === 'BracketLeft') {
-            let v = getActiveVideo();
             if (v) {
                 e.preventDefault();
                 let speeds = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
@@ -1298,12 +961,11 @@
                 if (idx === -1) idx = 2;
                 let nextIdx = Math.max(0, idx - 1);
                 v.playbackRate = speeds[nextIdx];
-                showVideoToast(v, `Скорость: ${speeds[nextIdx]}x`);
+                showVideoToast(`Скорость: ${speeds[nextIdx]}x`);
             }
         }
         // BracketRight ']': Speed up
         else if (e.key === ']' || e.code === 'BracketRight') {
-            let v = getActiveVideo();
             if (v) {
                 e.preventDefault();
                 let speeds = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
@@ -1312,13 +974,19 @@
                 if (idx === -1) idx = 2;
                 let nextIdx = Math.min(speeds.length - 1, idx + 1);
                 v.playbackRate = speeds[nextIdx];
-                showVideoToast(v, `Скорость: ${speeds[nextIdx]}x`);
+                showVideoToast(`Скорость: ${speeds[nextIdx]}x`);
             }
         }
         // Key P: Picture-in-Picture
         else if (e.key === 'p' || e.key === 'P' || e.code === 'KeyP') {
-            e.preventDefault();
-            togglePiP();
+            if (v) {
+                e.preventDefault();
+                if (document.pictureInPictureElement) {
+                    document.exitPictureInPicture().then(() => showVideoToast('PiP выключен')).catch(() => {});
+                } else if (document.pictureInPictureEnabled) {
+                    v.requestPictureInPicture().then(() => showVideoToast('Картинка в картинке')).catch(() => {});
+                }
+            }
         }
     }, true);
 
@@ -1331,9 +999,7 @@
         updateRepostTab();
         cleanupProfileBanners();
         filterContent();
-        updatePiPButtons();
-        updateDescriptionActions();
-        updateCommentsTranslation();
+        bindVideoVolume();
     };
 
     // Run interval
