@@ -193,7 +193,7 @@ async def inject_tab(ws_url, script_content):
         pass
 
 def cdp_injector_loop(script_content, stop_event):
-    """Proactive background injector that keeps TikTok Fix running across SPA navigation."""
+    """CDP injector."""
     while not stop_event.is_set():
         try:
             import urllib.request
@@ -222,7 +222,7 @@ def find_browser():
     return None
 
 def cleanup_stale_processes():
-    """Kill lingering Chrome or Python processes from prior crashes/sessions to prevent singleton locking."""
+    """Clean up processes and locks."""
     try:
         import psutil
         curr_pid = os.getpid()

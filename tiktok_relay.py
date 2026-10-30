@@ -3,7 +3,7 @@ import threading
 import time
 import socket
 
-# Curated, live-verified high-speed proxy pool (all verified Status 200 on TikTok)
+# SOCKS5 proxy pool
 PROXY_REGIONS = {
     "FR": [
         ("207.180.217.98", 1088),
@@ -32,7 +32,7 @@ PROXY_REGIONS = {
     ],
 }
 
-# Domains that do not need proxy and load 100x faster directly from CDN
+# Direct CDN domains
 DIRECT_CDN_DOMAINS = [
     "tiktokcdn.com",
     "tiktokcdn-eu.com",
@@ -199,7 +199,7 @@ class TikTokProxyRelay:
                 except Exception:
                     pass
 
-            # 4. Proxy routing for TikTok web and recommendations with auto-failover
+            # Proxy routing
             candidates = self.get_candidates()
             for cand_host, cand_port in candidates:
                 try:
