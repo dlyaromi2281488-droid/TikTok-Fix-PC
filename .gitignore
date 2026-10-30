@@ -1,0 +1,11 @@
+# User profile with session/cookies (Never commit to public repo!)
+tiktok_fix_profile/
+cattok_profile/
+*.log
+*.tmp
+__pycache__/
+.idea/
+.vscode/
+*.apk
+*.zip
+*.jar

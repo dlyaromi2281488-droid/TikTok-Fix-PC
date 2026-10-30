@@ -1,0 +1,154 @@
+/* TikTok Fix Styles */
+
+/* Author upload date badge (Always ON) */
+.tiktok-fix-date {
+    display: inline-flex !important;
+    align-items: center !important;
+    gap: 4px !important;
+    font-size: 12px !important;
+    font-weight: 700 !important;
+    color: #ff3b5c !important;
+    background: rgba(255, 59, 92, 0.16) !important;
+    border: 1px solid rgba(255, 59, 92, 0.4) !important;
+    border-radius: 6px !important;
+    padding: 2px 8px !important;
+    margin-left: 8px !important;
+    vertical-align: middle !important;
+    line-height: 1.3 !important;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3) !important;
+    pointer-events: auto !important;
+}
+
+/* Right-side Settings Panel */
+#tiktok-fix-panel {
+    position: fixed !important;
+    right: 24px !important;
+    top: 75px !important;
+    width: 280px !important;
+    background: rgba(18, 18, 26, 0.97) !important;
+    backdrop-filter: blur(20px) !important;
+    border: 1px solid rgba(255, 255, 255, 0.15) !important;
+    border-radius: 14px !important;
+    padding: 16px !important;
+    color: #ffffff !important;
+    z-index: 2147483647 !important;
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.8) !important;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif !important;
+    display: none;
+    user-select: none !important;
+}
+
+#tiktok-fix-panel h3 {
+    margin: 0 0 12px 0 !important;
+    font-size: 15px !important;
+    font-weight: 700 !important;
+    display: flex !important;
+    justify-content: space-between !important;
+    align-items: center !important;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1) !important;
+    padding-bottom: 8px !important;
+    color: #ffffff !important;
+}
+
+#tiktok-fix-panel .close-btn {
+    cursor: pointer !important;
+    color: #888899 !important;
+    font-size: 16px !important;
+    font-weight: bold !important;
+    padding: 2px 6px !important;
+}
+#tiktok-fix-panel .close-btn:hover {
+    color: #ffffff !important;
+}
+
+.tf-group {
+    margin-bottom: 12px !important;
+}
+.tf-group label {
+    display: block !important;
+    font-size: 11px !important;
+    color: #aaaaaa !important;
+    margin-bottom: 4px !important;
+    text-transform: uppercase !important;
+    font-weight: 600 !important;
+}
+
+.tf-select, .tf-btn {
+    width: 100% !important;
+    padding: 7px 10px !important;
+    border-radius: 6px !important;
+    font-size: 12px !important;
+    box-sizing: border-box !important;
+}
+
+.tf-select {
+    background: #252533 !important;
+    color: #ffffff !important;
+    border: 1px solid #3d3d50 !important;
+    outline: none !important;
+    cursor: pointer !important;
+}
+
+.tf-btn {
+    background: #252533 !important;
+    color: #ffffff !important;
+    border: 1px solid #3d3d50 !important;
+    cursor: pointer !important;
+    font-weight: 600 !important;
+    margin-top: 6px !important;
+    transition: all 0.15s ease !important;
+}
+.tf-btn:hover {
+    background: #333344 !important;
+    border-color: #555570 !important;
+}
+
+.tf-btn-primary {
+    background: #fe2c55 !important;
+    border: none !important;
+    color: #ffffff !important;
+    font-weight: bold !important;
+}
+.tf-btn-primary:hover {
+    background: #ff436b !important;
+}
+
+.tf-checkbox-row {
+    display: flex !important;
+    align-items: center !important;
+    gap: 8px !important;
+    margin-top: 6px !important;
+    font-size: 12px !important;
+    color: #dddddd !important;
+    cursor: pointer !important;
+}
+.tf-checkbox-row input {
+    cursor: pointer !important;
+    accent-color: #fe2c55 !important;
+}
+
+/* Right Edge Floating Toggle Tab */
+#tiktok-fix-tab {
+    position: fixed !important;
+    right: 0px !important;
+    top: 140px !important;
+    background: rgba(22, 22, 30, 0.9) !important;
+    color: #fe2c55 !important;
+    border: 1px solid rgba(254, 44, 85, 0.4) !important;
+    border-right: none !important;
+    border-radius: 8px 0 0 8px !important;
+    padding: 6px 12px !important;
+    font-size: 12px !important;
+    font-weight: 700 !important;
+    cursor: pointer !important;
+    z-index: 2147483646 !important;
+    backdrop-filter: blur(10px) !important;
+    box-shadow: -2px 4px 12px rgba(0, 0, 0, 0.4) !important;
+    transition: all 0.2s ease !important;
+    user-select: none !important;
+}
+#tiktok-fix-tab:hover {
+    background: #fe2c55 !important;
+    color: #ffffff !important;
+    padding-right: 16px !important;
+}
